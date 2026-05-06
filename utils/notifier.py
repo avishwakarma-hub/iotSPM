@@ -16,6 +16,14 @@ class Notifier:
             self.logger.info("Email disabled; notification skipped: %s", subject)
             return
 
+        host = self.cfg.get("host")
+        if not host:
+            self.logger.warning(
+                "Email enabled but smtp.host is not configured; notification skipped: %s",
+                subject,
+            )
+            return
+
         recipients = self.cfg.get("alert_email_to", [])
         if isinstance(recipients, str):
             recipients = [recipients]
@@ -26,12 +34,12 @@ class Notifier:
 
         msg = EmailMessage()
         msg["Subject"] = f"[iotSPM] {subject}"
-        msg["From"] = self.cfg.get("alert_email_from")
+        msg["From"] = self.cfg.get("alert_email_from") or self.cfg.get("username") or "iotspm@localhost"
         msg["To"] = ", ".join(recipients)
         msg.set_content(body)
 
         try:
-            with smtplib.SMTP(self.cfg.get("host"), int(self.cfg.get("port", 587)), timeout=30) as smtp:
+            with smtplib.SMTP(host, int(self.cfg.get("port", 587)), timeout=30) as smtp:
                 if self.cfg.get("use_tls", True):
                     smtp.starttls()
                 username = self.cfg.get("username")

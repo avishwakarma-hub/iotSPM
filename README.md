@@ -94,6 +94,9 @@ rundeck:
   project: <rundeck-project>
   username: <username>
   password: <password>
+  upload: GoogleDrive
+  keystore: security
+  allow_parallel_runs: false
   job_ids:
     build_only: <working-rundeck-job-uuid-for-this-query>
     all_location: <working-rundeck-job-uuid-for-this-query>
@@ -118,6 +121,19 @@ Environment variables can override common secrets:
 export RUNDECK_USERNAME='...'
 export RUNDECK_PASSWORD='...'
 export ZINTEL_API_KEY='...'
+```
+
+The Rundeck submitter reads the live job page and dynamically maps option names before posting to `/project/<project>/job/index`. If your Rundeck job uses unusual option names, add an `option_names` override in `config/settings.local.yaml`, for example:
+
+```yaml
+rundeck:
+  option_names:
+    query: extra.option.Query
+    start_time: extra.option.StartTime
+    end_time: extra.option.EndTime
+    output: extra.option.Output
+    upload: extra.option.Upload
+    cloud: extra.option.Cloud
 ```
 
 If submit fails with `HTTP 404` on `/project/<project>/job/show/<job_id>`, the query job UUID or project/base URL is wrong for your environment. Open the Rundeck job manually in a browser and copy the UUID from the working job URL into `rundeck.job_ids.<query_name>` in `config/settings.local.yaml`.
