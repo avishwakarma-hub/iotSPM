@@ -21,6 +21,15 @@ rundeck:
   project: zanalytics
   security_job_id: 8dbcad77-cc90-4855-a03f-2d9d8a539c07
   weblog_job_id: a6d60171-c4f8-433c-82e4-446af2ebb61d
+  # Prefer query-specific job ids in settings.local.yaml when your environment
+  # uses different Rundeck jobs for different report templates.
+  job_ids:
+    build_only: a6d60171-c4f8-433c-82e4-446af2ebb61d
+    all_location: a6d60171-c4f8-433c-82e4-446af2ebb61d
+    enriched_location: a6d60171-c4f8-433c-82e4-446af2ebb61d
+  job_show_url_template: "{base_url}/project/{project}/job/show/{job_id}"
+  execution_show_url_template: "{base_url}/project/{project}/execution/show/{execution_id}"
+  verify_ssl: false
   username: replace_me
   password: replace_me
   user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36

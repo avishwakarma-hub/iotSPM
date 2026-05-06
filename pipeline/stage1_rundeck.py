@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 
 TIME_FORMAT = "%d%b%Y:%H:%M:%S"
@@ -15,7 +16,9 @@ class RundeckClient:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg["rundeck"]
         self.session = requests.Session()
-        self.session.verify = False
+        self.session.verify = bool(self.cfg.get("verify_ssl", False))
+        if not self.session.verify:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self.session_id: Optional[str] = None
 
     def login(self) -> None:
@@ -35,11 +38,18 @@ class RundeckClient:
         if not self.session_id:
             raise RuntimeError("Rundeck login failed: JSESSIONID cookie missing")
 
-    def submit_query(self, query: str, start_time: str, end_time: str, output_format: Optional[str] = None) -> str:
+    def submit_query(
+        self,
+        query: str,
+        start_time: str,
+        end_time: str,
+        output_format: Optional[str] = None,
+        query_name: Optional[str] = None,
+    ) -> str:
         self._ensure_login()
-        job_id = self._job_id_for_query(query)
+        job_id = self._job_id_for_query(query, query_name)
         token = self._csrf_token(job_id)
-        run_url = f"{self.cfg['base_url']}/project/{self.cfg['project']}/job/show/{job_id}"
+        run_url = self._job_show_url(job_id)
         form_data = [
             ("SYNCHRONIZER_TOKEN", token),
             ("extra.option.Query", query),
@@ -62,7 +72,7 @@ class RundeckClient:
             cookies={"JSESSIONID": self.session_id, "communityNews": "20"},
             data=form_data,
         )
-        resp.raise_for_status()
+        self._raise_for_status(resp, "submit Rundeck query", run_url, job_id)
         execution_id = self._extract_execution_id(resp.text)
         if not execution_id:
             raise RuntimeError("Query submitted but execution id could not be extracted")
@@ -70,9 +80,9 @@ class RundeckClient:
 
     def poll_execution(self, execution_id: str) -> Dict[str, Any]:
         self._ensure_login()
-        url = f"{self.cfg['base_url']}/project/{self.cfg['project']}/execution/show/{execution_id}"
+        url = self._execution_show_url(execution_id)
         resp = self.session.get(url, headers={"User-Agent": self.cfg.get("user_agent")})
-        resp.raise_for_status()
+        self._raise_for_status(resp, "poll Rundeck execution", url)
         html = resp.text
         status = self._extract_status(html)
         drive_file_id, drive_file_name = self._extract_drive_file(html)
@@ -98,18 +108,55 @@ class RundeckClient:
         if not self.session_id:
             self.login()
 
-    def _job_id_for_query(self, query: str) -> str:
-        return self.cfg.get("weblog_job_id") if query.strip().lower().startswith("from weblog") else self.cfg.get("security_job_id")
+    def _job_id_for_query(self, query: str, query_name: Optional[str] = None) -> str:
+        job_ids = self.cfg.get("job_ids", {})
+        if query_name and job_ids.get(query_name):
+            return job_ids[query_name]
+
+        job_id = self.cfg.get("weblog_job_id") if query.strip().lower().startswith("from weblog") else self.cfg.get("security_job_id")
+        if not job_id:
+            raise RuntimeError(
+                "No Rundeck job id configured. Set rundeck.job_ids.<query_name> or "
+                "rundeck.weblog_job_id/security_job_id in config/settings.local.yaml."
+            )
+        return job_id
+
+    def _job_show_url(self, job_id: str) -> str:
+        template = self.cfg.get("job_show_url_template", "{base_url}/project/{project}/job/show/{job_id}")
+        return template.format(base_url=self.cfg["base_url"].rstrip("/"), project=self.cfg["project"], job_id=job_id)
+
+    def _execution_show_url(self, execution_id: str) -> str:
+        template = self.cfg.get("execution_show_url_template", "{base_url}/project/{project}/execution/show/{execution_id}")
+        return template.format(base_url=self.cfg["base_url"].rstrip("/"), project=self.cfg["project"], execution_id=execution_id)
 
     def _csrf_token(self, job_id: str) -> str:
-        url = f"{self.cfg['base_url']}/project/{self.cfg['project']}/job/show/{job_id}"
+        url = self._job_show_url(job_id)
         resp = self.session.get(url, headers={"User-Agent": self.cfg.get("user_agent")})
-        resp.raise_for_status()
+        self._raise_for_status(resp, "open Rundeck job page", url, job_id)
         soup = BeautifulSoup(resp.text, "html.parser")
         token = soup.find("input", {"name": "SYNCHRONIZER_TOKEN"})
         if not token or not token.get("value"):
-            raise RuntimeError("Could not locate Rundeck SYNCHRONIZER_TOKEN")
+            title = soup.find("title")
+            title_text = title.get_text(strip=True) if title else "no page title"
+            raise RuntimeError(
+                "Could not locate Rundeck SYNCHRONIZER_TOKEN. "
+                f"URL={url} title={title_text!r}. This usually means the configured job id/path is wrong "
+                "or the logged-in user cannot access that job. Open the URL in a browser and copy the working job URL/job UUID."
+            )
         return token["value"]
+
+    @staticmethod
+    def _raise_for_status(resp: requests.Response, action: str, url: str, job_id: Optional[str] = None) -> None:
+        try:
+            resp.raise_for_status()
+        except requests.HTTPError as exc:
+            snippet = re.sub(r"\s+", " ", resp.text[:500]).strip()
+            job_hint = f" job_id={job_id}" if job_id else ""
+            raise RuntimeError(
+                f"Failed to {action}: HTTP {resp.status_code} {resp.reason}. URL={url}{job_hint}. "
+                f"Response snippet={snippet!r}. If this is 404, verify rundeck.base_url, rundeck.project, "
+                "and the configured job id in config/settings.local.yaml."
+            ) from exc
 
     @staticmethod
     def _extract_execution_id(html: str) -> Optional[str]:

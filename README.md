@@ -91,8 +91,13 @@ Edit at least:
 ```yaml
 rundeck:
   base_url: https://<your-rundeck-host>
+  project: <rundeck-project>
   username: <username>
   password: <password>
+  job_ids:
+    build_only: <working-rundeck-job-uuid-for-this-query>
+    all_location: <working-rundeck-job-uuid-for-this-query>
+    enriched_location: <working-rundeck-job-uuid-for-this-query>
 
 spm:
   api_key: <zintel-api-key>
@@ -114,6 +119,8 @@ export RUNDECK_USERNAME='...'
 export RUNDECK_PASSWORD='...'
 export ZINTEL_API_KEY='...'
 ```
+
+If submit fails with `HTTP 404` on `/project/<project>/job/show/<job_id>`, the query job UUID or project/base URL is wrong for your environment. Open the Rundeck job manually in a browser and copy the UUID from the working job URL into `rundeck.job_ids.<query_name>` in `config/settings.local.yaml`.
 
 ## Google Drive OAuth
 

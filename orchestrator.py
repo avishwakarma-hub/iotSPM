@@ -28,7 +28,7 @@ class PipelineOrchestrator:
         self.logger.info("Created run %s for %s query=%s", run_id, day, query_name)
         client = RundeckClient(self.cfg)
         try:
-            execution_id = client.submit_query(query, start_time, end_time)
+            execution_id = client.submit_query(query, start_time, end_time, query_name=query_name)
             self.db.update_run(run_id, status="submitted", state="RUNDECK_SUBMITTED", execution_id=execution_id)
             self.notifier.send("Rundeck query submitted", f"Run {run_id} submitted. Execution ID: {execution_id}")
             return run_id
