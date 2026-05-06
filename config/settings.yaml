@@ -35,7 +35,6 @@ rundeck:
   user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36
   output_format: CSV
   upload: GoogleDrive
-  keystore: security
   timezone: GMT
   query_type: web_query
   show_hidden_transaction: "no"

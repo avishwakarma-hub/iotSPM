@@ -95,7 +95,7 @@ rundeck:
   username: <username>
   password: <password>
   upload: GoogleDrive
-  keystore: security
+  query_type: web_query
   allow_parallel_runs: false
   job_ids:
     build_only: <working-rundeck-job-uuid-for-this-query>

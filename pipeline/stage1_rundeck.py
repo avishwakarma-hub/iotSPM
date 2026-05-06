@@ -257,7 +257,7 @@ class RundeckClient:
             form_data = self._set_form_values(form_data, show_hidden_name, self.cfg.get("show_hidden_transaction", "no"))
             form_data = self._set_form_values(form_data, keystore_name, None)
         else:
-            form_data = self._set_form_values(form_data, keystore_name, self.cfg.get("keystore", "security"))
+            form_data = self._set_form_values(form_data, keystore_name, self.cfg.get("keystore"))
             form_data = self._set_form_values(form_data, timezone_name, None)
             form_data = self._set_form_values(form_data, query_type_name, None)
             form_data = self._set_form_values(form_data, show_hidden_name, None)
