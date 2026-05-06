@@ -18,9 +18,60 @@ class DeviceAtlasMapper:
         self.cfg = cfg
         self.db = db
         api_dir = Path(cfg.get("paths", {}).get("deviceatlas_python_api_dir", ""))
-        if api_dir.exists() and str(api_dir) not in sys.path:
-            sys.path.insert(0, str(api_dir))
+        self.deviceatlas_python_paths = self._add_deviceatlas_python_paths(api_dir)
         self.api = self._load_api()
+
+    @classmethod
+    def _add_deviceatlas_python_paths(cls, api_dir: Path) -> List[str]:
+        added: List[str] = []
+        for candidate in cls._deviceatlas_sys_path_candidates(api_dir):
+            candidate_str = str(candidate)
+            if candidate.exists() and candidate_str not in sys.path:
+                sys.path.insert(0, candidate_str)
+                added.append(candidate_str)
+        return added
+
+    @staticmethod
+    def _deviceatlas_sys_path_candidates(api_dir: Path) -> List[Path]:
+        """Return import roots for common DeviceAtlas archive layouts.
+
+        DeviceAtlas imports require the directory *above* `com/` on sys.path.
+        The configured path may be any of these:
+
+        - .../API
+        - .../API/deviceatlas-enterprise-3.2.1
+        - .../API/deviceatlas-enterprise-3.2.1/src
+        - .../src/com/deviceatlas/device
+        """
+        if not str(api_dir):
+            return []
+
+        candidates: List[Path] = []
+
+        def add(path: Path) -> None:
+            if path not in candidates:
+                candidates.append(path)
+
+        add(api_dir)
+        add(api_dir / "src")
+        add(api_dir / "deviceatlas-enterprise-3.2.1" / "src")
+        add(api_dir / "API" / "deviceatlas-enterprise-3.2.1" / "src")
+
+        # If the user configured a path inside the Python package tree, walk
+        # back to the directory that contains `com/`.
+        parts = api_dir.parts
+        if "com" in parts:
+            com_index = parts.index("com")
+            if com_index > 0:
+                add(Path(*parts[:com_index]))
+
+        # Auto-discover nested unpacked archives below API without requiring
+        # `setup.py install` or sudo. Keep this targeted to avoid broad scans.
+        if api_dir.exists():
+            for device_api in api_dir.glob("**/src/com/deviceatlas/device/device_api.py"):
+                add(device_api.parents[3])
+
+        return candidates
 
     def _load_api(self):
         DeviceApi, _DataLoadingException = self._import_deviceatlas_classes()
@@ -62,7 +113,8 @@ class DeviceAtlasMapper:
                 errors.append(f"{device_module_name}: {exc}")
         raise RuntimeError(
             "DeviceAtlas API import failed. Verify paths.deviceatlas_python_api_dir points to the "
-            "DeviceAtlas Enterprise Python API directory or install it in the active venv. "
+            "DeviceAtlas Enterprise Python API directory, its nested src directory, or the package path "
+            "containing com/deviceatlas. No sudo install is required when this path is correct. "
             "Tried com.deviceatlas... and mobi.mtld... namespaces. Errors: " + " | ".join(errors)
         )
 

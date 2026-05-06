@@ -55,20 +55,37 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Install DeviceAtlas Enterprise Python API
+## Configure DeviceAtlas Enterprise Python API
 
 Place/extract the package so this exists:
 
 ```text
-/mnt/ext_storage/iotSPM/deviceatlas-enterprise-python-3.2.1/API
+/mnt/ext_storage/iotSPM/Deviceatlas/deviceatlas-enterprise-python-3.2.1/API/deviceatlas-enterprise-3.2.1/src/com/deviceatlas/device
 ```
 
-Then install it into the venv:
+You do **not** need to run `setup.py install`, and you should avoid `sudo` for
+venv-based runs. `sudo setup.py install` installs into the system Python, but
+the pipeline runs inside `.venv`, so `.venv` will not see that package.
+
+Instead, point `paths.deviceatlas_python_api_dir` to either the extracted `API`
+directory or directly to the nested `src` directory in `config/settings.local.yaml`:
 
 ```bash
-cd /mnt/ext_storage/iotSPM/deviceatlas-enterprise-python-3.2.1/API
-pip install -e .
+cp config/settings.yaml config/settings.local.yaml
+vim config/settings.local.yaml
 ```
+
+Example override:
+
+```yaml
+paths:
+  deviceatlas_python_api_dir: /mnt/ext_storage/iotSPM/Deviceatlas/deviceatlas-enterprise-python-3.2.1/API
+  # This also works:
+  # deviceatlas_python_api_dir: /mnt/ext_storage/iotSPM/Deviceatlas/deviceatlas-enterprise-python-3.2.1/API/deviceatlas-enterprise-3.2.1/src
+```
+
+The loader auto-discovers common extracted layouts and adds the correct import
+root to `sys.path`, including the directory above `com/deviceatlas`.
 
 Also place the DeviceAtlas data file at the path configured in `config/settings.yaml`:
 
