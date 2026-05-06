@@ -4,8 +4,9 @@ import csv
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from utils.config import load_yaml
 from utils.db import Database
@@ -22,13 +23,7 @@ class DeviceAtlasMapper:
         self.api = self._load_api()
 
     def _load_api(self):
-        try:
-            from mobi.mtld.da.device.device_api import DeviceApi  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "DeviceAtlas API import failed. Install deviceatlas-enterprise-python-3.2.1/API "
-                "with `pip install -e .` or verify deviceatlas_python_api_dir."
-            ) from exc
+        DeviceApi, _DataLoadingException = self._import_deviceatlas_classes()
         json_file = Path(self.cfg["paths"]["deviceatlas_json"])
         if not json_file.exists():
             raise FileNotFoundError(f"DeviceAtlas JSON data file not found: {json_file}")
@@ -36,15 +31,75 @@ class DeviceAtlasMapper:
         api.load_data_from_file(str(json_file))
         return api
 
+    @staticmethod
+    def _import_deviceatlas_classes() -> Tuple[Any, Any]:
+        """Import DeviceAtlas classes across supported enterprise API layouts.
+
+        Newer DeviceAtlas Enterprise Python APIs use the Java-style namespace
+        used by the existing helper script:
+        `com.deviceatlas.device.device_api.DeviceApi`.
+
+        Some older samples use `mobi.mtld.da...`, so keep it as a fallback for
+        backwards compatibility.
+        """
+        candidates = [
+            (
+                "com.deviceatlas.device.device_api",
+                "com.deviceatlas.exception.data_loading_exception",
+            ),
+            (
+                "mobi.mtld.da.device.device_api",
+                "mobi.mtld.da.exception.data_loading_exception",
+            ),
+        ]
+        errors: List[str] = []
+        for device_module_name, exception_module_name in candidates:
+            try:
+                device_module = import_module(device_module_name)
+                exception_module = import_module(exception_module_name)
+                return device_module.DeviceApi, getattr(exception_module, "DataLoadingException", Exception)
+            except Exception as exc:
+                errors.append(f"{device_module_name}: {exc}")
+        raise RuntimeError(
+            "DeviceAtlas API import failed. Verify paths.deviceatlas_python_api_dir points to the "
+            "DeviceAtlas Enterprise Python API directory or install it in the active venv. "
+            "Tried com.deviceatlas... and mobi.mtld... namespaces. Errors: " + " | ".join(errors)
+        )
+
     def map_user_agent(self, user_agent: str) -> Dict[str, Any]:
         digest = ua_hash(user_agent)
         cached = self.db.cache_get("deviceatlas_cache", digest)
         if cached:
             return json.loads(cached["properties_json"])
-        properties = self.api.get_properties(user_agent) or {}
-        properties = {key: _json_safe(value) for key, value in properties.items()}
+        properties = self._get_properties(user_agent)
+        properties = self._normalize_properties(properties)
         self.db.cache_deviceatlas(digest, user_agent, properties)
         return properties
+
+    def _get_properties(self, user_agent: str) -> Dict[str, Any]:
+        """Call DeviceAtlas using the header-map style expected by com.deviceatlas.
+
+        The working legacy script uses `get_properties({"User-Agent": ua})`.
+        Keep a string fallback so older API builds continue to work.
+        """
+        try:
+            return self.api.get_properties({"User-Agent": user_agent}) or {}
+        except TypeError:
+            return self.api.get_properties(user_agent) or {}
+
+    def _normalize_properties(self, properties: Any) -> Dict[str, Any]:
+        if hasattr(properties, "items"):
+            return {key: _json_safe(value) for key, value in properties.items()}
+
+        property_names = self.cfg.get("deviceatlas", {}).get("properties", [])
+        normalized: Dict[str, Any] = {}
+        for name in property_names:
+            try:
+                value = properties.get(name)
+            except Exception:
+                continue
+            normalized[name] = _json_safe(value)
+        return normalized
 
 
 def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str | Path) -> Path:
