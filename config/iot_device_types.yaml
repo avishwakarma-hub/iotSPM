@@ -1,0 +1,35 @@
+keep:
+  - 3D Printer
+  - Braille Tablet
+  - Camera
+  - Cellular Gateway
+  - Data Collection Terminal
+  - Digital Home Assistant
+  - Digital Signage Media Player
+  - DVR
+  - eReader
+  - Games Console
+  - Geolocation Tracker
+  - Industry Control Device
+  - IP Camera
+  - IP Phone
+  - Media Player
+  - Medical Device
+  - Networking Device
+  - Payment Terminal
+  - Printer
+  - Projector
+  - Security Hub
+  - Set Top Box
+  - Smart Glass
+  - TV
+  - Telematics Control Unit
+  - Vehicle Multimedia System
+  - VR Headset
+  - Wireless Hotspot
+  - Wristwatch
+
+reject:
+  - Desktop
+  - Mobile Phone
+  - Tablet

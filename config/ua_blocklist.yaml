@@ -1,0 +1,18 @@
+hard_reject_regex:
+  - '(?i)googlebot|bingbot|yandexbot|baiduspider|duckduckbot|slurp|crawler|spider|semrushbot|ahrefsbot'
+  - '(?i)(union\s+select|drop\s+table|insert\s+into|<script|javascript:|/bin/sh|cmd\.exe|powershell)'
+  - '^[-_.:/\\|,;\s0-9]+$'
+
+desktop_reject_regex:
+  - '(?i)windows nt.*(chrome|firefox|edg|safari)'
+  - '(?i)macintosh; intel mac os x'
+  - '(?i)\bcros\b'
+  - '(?i)iphone os|ipad; cpu os'
+
+iot_positive_regex:
+  - '(?i)build/'
+  - '(?i)dalvik/'
+  - '(?i)android-checkin'
+  - '(?i)linux;\s*u;'
+  - '(?i)com\.android\.vending|com\.google\.android\.gms|com\.google\.android\.youtube'
+  - '(?i)echo/|kindle/|roku|smart-tv|smarttv|hbbtv|tizen|webos'
