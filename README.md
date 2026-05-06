@@ -139,6 +139,8 @@ After successful auth it saves:
 
 Future runs reuse `token.json` silently. You should not need to authenticate again unless `token.json` is deleted, the refresh token is revoked, or Google/client credentials change.
 
+Seeing Chrome show `This site can't be reached` for `http://localhost:8080/...` is expected in this manual server flow. The important part is the `code=...` in the address bar. Paste that full URL into the terminal; the server exchanges the code and verifies Drive access before saving `token.json`.
+
 ## Common commands
 
 ### Submit a query

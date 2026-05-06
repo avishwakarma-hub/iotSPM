@@ -53,8 +53,12 @@ def main() -> None:
     cfg, logger, app = build_app(args.config)
 
     if args.cmd == "auth-drive":
-        get_drive_service(cfg)
-        print("Google Drive authentication completed.")
+        service = get_drive_service(cfg)
+        about = service.about().get(fields="user(emailAddress,displayName)").execute()
+        user = about.get("user", {})
+        identity = user.get("emailAddress") or user.get("displayName") or "unknown account"
+        print(f"Google Drive authentication verified for: {identity}")
+        print(f"Token saved at: {cfg['paths']['google_token_file']}")
     elif args.cmd == "submit":
         print(app.submit(args.day, args.query))
     elif args.cmd == "poll":
