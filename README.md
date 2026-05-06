@@ -129,13 +129,15 @@ Run one-time auth:
 python run.py auth-drive
 ```
 
-It will print a URL/code flow for headless server auth and save:
+It will print a URL/code flow for headless server auth. Open the URL manually in your browser, approve access, then paste either the returned code or the full `http://localhost:8080/?code=...` redirected URL into the terminal.
+
+After successful auth it saves:
 
 ```text
 /mnt/ext_storage/iotSPM/credentials/token.json
 ```
 
-Future runs reuse `token.json` silently.
+Future runs reuse `token.json` silently. You should not need to authenticate again unless `token.json` is deleted, the refresh token is revoked, or Google/client credentials change.
 
 ## Common commands
 

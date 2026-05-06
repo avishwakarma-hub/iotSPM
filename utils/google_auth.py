@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict
+from urllib.parse import parse_qs, urlparse
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -47,7 +48,12 @@ def _manual_oauth(flow: InstalledAppFlow) -> Credentials:
             raise RuntimeError("Could not find 'code' in redirected URL")
         code = values["code"][0]
 
-    flow.fetch_token(code=code)
+    # Google can return extra already-granted scopes, e.g. drive.file plus
+    # drive.readonly. oauthlib raises a Warning exception for that by default.
+    # Relaxing this still preserves OAuth validation while allowing the token
+    # to be saved and reused for future unattended runs.
+    os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+    flow.fetch_token(code=code, include_granted_scopes=True)
     return flow.credentials
 
 
