@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
+TERMINAL_STATES = ("COMPLETED", "FAILED", "RUNDECK_FAILED", "RUNDECK_ABORTED", "RUNDECK_TIMEDOUT")
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -96,6 +99,29 @@ class Database:
                     week_number TEXT,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS scheduler_state (
+                    name TEXT PRIMARY KEY,
+                    query_name TEXT NOT NULL,
+                    base_date TEXT NOT NULL,
+                    last_submitted_date TEXT,
+                    last_completed_date TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS retry_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL UNIQUE,
+                    requested_stage TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    note TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_error TEXT
+                );
                 """
             )
             self._migrate_runs_table(conn)
@@ -152,8 +178,7 @@ class Database:
             return list(conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)))
 
     def list_active_runs(self) -> List[sqlite3.Row]:
-        terminal_states = ("COMPLETED", "FAILED", "RUNDECK_FAILED", "RUNDECK_ABORTED", "RUNDECK_TIMEDOUT")
-        placeholders = ",".join("?" for _ in terminal_states)
+        placeholders = ",".join("?" for _ in TERMINAL_STATES)
         with self.connect() as conn:
             return list(
                 conn.execute(
@@ -163,9 +188,108 @@ class Database:
                       AND state NOT IN ({placeholders})
                     ORDER BY id ASC
                     """,
-                    terminal_states,
+                    TERMINAL_STATES,
                 )
             )
+
+    def count_active_runs(self) -> int:
+        terminal_states = TERMINAL_STATES
+        placeholders = ",".join("?" for _ in terminal_states)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS count
+                FROM runs
+                WHERE execution_id IS NOT NULL
+                  AND state NOT IN ({placeholders})
+                """,
+                terminal_states,
+            ).fetchone()
+            return int(row["count"] if row else 0)
+
+    def find_runs_for_date(self, run_date: str, query_name: str) -> List[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(
+                conn.execute(
+                    """
+                    SELECT * FROM runs
+                    WHERE run_date = ? AND query_name = ?
+                    ORDER BY id ASC
+                    """,
+                    (run_date, query_name),
+                )
+            )
+
+    def get_scheduler_state(self, name: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute("SELECT * FROM scheduler_state WHERE name = ?", (name,)).fetchone()
+
+    def upsert_scheduler_state(self, name: str, query_name: str, base_date: str, enabled: bool = True) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scheduler_state(name, query_name, base_date, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    query_name = excluded.query_name,
+                    base_date = excluded.base_date,
+                    enabled = excluded.enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (name, query_name, base_date, 1 if enabled else 0, now, now),
+            )
+
+    def update_scheduler_state(self, name: str, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = utcnow()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        values = list(fields.values())
+        values.append(name)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE scheduler_state SET {assignments} WHERE name = ?", values)
+
+    def list_scheduler_states(self) -> List[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(conn.execute("SELECT * FROM scheduler_state ORDER BY name ASC"))
+
+    def add_retry(self, run_id: int, requested_stage: Optional[str] = None, note: Optional[str] = None) -> None:
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO retry_queue(run_id, requested_stage, status, attempts, note, created_at, updated_at)
+                VALUES (?, ?, 'queued', 0, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    requested_stage = excluded.requested_stage,
+                    status = 'queued',
+                    note = excluded.note,
+                    updated_at = excluded.updated_at,
+                    last_error = NULL
+                """,
+                (run_id, requested_stage, note, now, now),
+            )
+
+    def list_retries(self, status: Optional[str] = None) -> List[sqlite3.Row]:
+        with self.connect() as conn:
+            if status:
+                return list(conn.execute("SELECT * FROM retry_queue WHERE status = ? ORDER BY id ASC", (status,)))
+            return list(conn.execute("SELECT * FROM retry_queue ORDER BY id ASC"))
+
+    def update_retry(self, run_id: int, **fields: Any) -> None:
+        if not fields:
+            return
+        fields["updated_at"] = utcnow()
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        values = list(fields.values())
+        values.append(run_id)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE retry_queue SET {assignments} WHERE run_id = ?", values)
+
+    def remove_retry(self, run_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM retry_queue WHERE run_id = ?", (run_id,))
 
     def cache_get(self, table: str, ua_hash: str) -> Optional[sqlite3.Row]:
         if table not in {"deviceatlas_cache", "spm_cache"}:

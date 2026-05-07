@@ -5,6 +5,7 @@ from pathlib import Path
 
 from orchestrator import PipelineOrchestrator
 from pipeline.stage2_download import download_drive_file
+from scheduler import ProgressiveScheduler
 from utils.config import ensure_directories, load_config
 from utils.db import Database
 from utils.google_auth import get_drive_service
@@ -29,12 +30,16 @@ def build_app(config_path: str):
     ensure_directories(cfg)
     logger = setup_logging(cfg)
     db = Database(cfg["paths"]["db_path"])
-    return cfg, logger, PipelineOrchestrator(cfg, db, logger)
+    return cfg, logger, db, PipelineOrchestrator(cfg, db, logger)
+
+
+def build_scheduler(cfg, logger, db, app) -> ProgressiveScheduler:
+    return ProgressiveScheduler(cfg, db, app, logger)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="iotSPM Zscaler UA → DeviceAtlas → SPM review pipeline",
+        description="iotSPM Zscaler UA -> DeviceAtlas -> SPM review pipeline",
         epilog=STATE_REFERENCE,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -60,6 +65,24 @@ def main() -> None:
     p = sub.add_parser("poll-active", help="Poll all active Rundeck runs; useful from cron")
     p.add_argument("--auto-process", action="store_true", help="Process succeeded runs automatically")
     add_verbose_flag(p)
+
+    p = sub.add_parser("scheduler-set-base", help="Initialize/update the progressive daily scheduler base date")
+    p.add_argument("--date", required=True, help="First day to process, YYYY-MM-DD")
+    p.add_argument("--query", help="Query name from config/settings.yaml; defaults to scheduler.query_name")
+    p.add_argument("--disabled", action="store_true", help="Create/update scheduler state as disabled")
+
+    p = sub.add_parser("scheduler-tick", help="Run one cron-safe scheduler tick: retry, poll/process active, then submit next day")
+    p.add_argument("--dry-run", action="store_true", help="Show the next scheduler action without polling, processing, or submitting")
+    add_verbose_flag(p)
+
+    sub.add_parser("scheduler-status", help="Show scheduler cursor, next pending date, active runs, and queued retries")
+
+    p = sub.add_parser("retry-add", help="Queue a failed/interrupted run for scheduler-managed processing retry")
+    p.add_argument("run_id", type=int)
+    p.add_argument("--from-stage", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Stage to rebuild from; inferred from last_stage when omitted")
+    p.add_argument("--note", help="Optional operator note")
+
+    sub.add_parser("retry-list", help="List scheduler retry queue")
 
     process = sub.add_parser(
         "process",
@@ -91,7 +114,7 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=20)
 
     args = parser.parse_args()
-    cfg, logger, app = build_app(args.config)
+    cfg, logger, db, app = build_app(args.config)
     if getattr(args, "verbose", False):
         cfg.setdefault("runtime", {}).setdefault("progress", {})["enabled"] = True
         app.set_progress(progress_from_config(cfg))
@@ -109,6 +132,29 @@ def main() -> None:
         print(app.poll(args.run_id))
     elif args.cmd == "poll-active":
         app.poll_active(auto_process=args.auto_process)
+    elif args.cmd == "scheduler-set-base":
+        scheduler = build_scheduler(cfg, logger, db, app)
+        scheduler.set_base(args.date, query_name=args.query, enabled=not args.disabled)
+        print(f"Scheduler base set to {args.date} query={args.query or scheduler.query_name} enabled={not args.disabled}")
+    elif args.cmd == "scheduler-tick":
+        scheduler = build_scheduler(cfg, logger, db, app)
+        decision = scheduler.tick(dry_run=args.dry_run)
+        logger.info("Scheduler decision: %s", decision)
+    elif args.cmd == "scheduler-status":
+        scheduler = build_scheduler(cfg, logger, db, app)
+        scheduler.status()
+    elif args.cmd == "retry-add":
+        db.add_retry(args.run_id, requested_stage=args.from_stage, note=args.note)
+        print(f"Queued run {args.run_id} for retry from {args.from_stage or 'auto'}")
+    elif args.cmd == "retry-list":
+        retries = db.list_retries()
+        if not retries:
+            print("Retry queue is empty.")
+        for item in retries:
+            print(
+                f"#{item['id']} run_id={item['run_id']} status={item['status']} "
+                f"stage={item['requested_stage']} attempts={item['attempts']} error={item['last_error']}"
+            )
     elif args.cmd == "process":
         print(
             app.process_ready_run(
@@ -120,7 +166,6 @@ def main() -> None:
         )
     elif args.cmd == "run-local":
         if args.stop_after:
-            db = Database(cfg["paths"]["db_path"])
             run_id = db.create_run(args.day, "local_file", "local-file", "", "")
             db.update_run(run_id, raw_path=str(Path(args.path)), status="local", state="LOCAL_FILE")
             print(app.process_ready_run(run_id, stop_after=args.stop_after))

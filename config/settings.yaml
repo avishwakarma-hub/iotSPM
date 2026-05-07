@@ -54,6 +54,20 @@ rundeck:
     all_location: 'from weblog select count(1) where userid=locationid AND malsigid=0 group by useragent'
     enriched_location: 'from weblog select count(1), ua_token, mobile_device where userid=locationid AND malsigid=0 group by useragent, ua_token, mobile_device'
 
+scheduler:
+  enabled: false
+  name: daily_build_only
+  query_name: build_only
+  # Set this with: python run.py scheduler-set-base --date YYYY-MM-DD
+  base_date: ""
+  date_lag_days: 1
+  max_active_rundeck_runs: 1
+  catch_up_enabled: true
+  auto_process_succeeded: true
+  process_retries_first: true
+  lock_timeout_minutes: 180
+  max_retries_per_tick: 1
+
 zclient:
   binary: /usr/local/bin/zclient
   timezone: GMT

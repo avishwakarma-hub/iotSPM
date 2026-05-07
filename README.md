@@ -211,6 +211,57 @@ For fully automated tracking of all submitted jobs, use:
 
 When status becomes `succeeded`, the pipeline stores the Google Drive file id if it can parse it from the Rundeck output.
 
+### Progressive daily scheduler
+
+For unattended daily operation, use the scheduler commands instead of manually
+submitting one date at a time. The scheduler keeps a cursor in SQLite, polls and
+processes active runs, and submits only the next missing eligible day. This is
+safe to run from cron because it uses a lock file under `logs_dir`.
+
+Enable and configure it in `config/settings.local.yaml`:
+
+```yaml
+scheduler:
+  enabled: true
+  name: daily_build_only
+  query_name: build_only
+  date_lag_days: 1              # do not submit today's still-changing logs
+  max_active_rundeck_runs: 1    # keep only one long-running Rundeck job active
+  auto_process_succeeded: true  # download/convert/filter/DeviceAtlas/SPM/report automatically
+```
+
+Initialize the first date once:
+
+```bash
+python run.py scheduler-set-base --date 2026-01-01 --query build_only
+python run.py scheduler-status
+python run.py scheduler-tick --dry-run
+```
+
+Then run one scheduler tick periodically from cron:
+
+```cron
+*/15 * * * * cd /mnt/ext_storage/iotSPM && . .venv/bin/activate && python run.py scheduler-tick >> logs/scheduler-cron.log 2>&1
+```
+
+Each tick follows this order:
+
+1. process one queued retry, if any;
+2. poll active Rundeck executions;
+3. automatically process succeeded runs when `auto_process_succeeded: true`;
+4. submit the next date from `base_date` up to `today - date_lag_days`, while
+   respecting `max_active_rundeck_runs`.
+
+If a processing run fails and you want cron to retry it later:
+
+```bash
+python run.py retry-add <run_id> --from-stage spm --note "SPM timeout"
+python run.py retry-list
+```
+
+When `--from-stage` is omitted, the scheduler infers the next stage from the
+run's stored `last_stage`.
+
 ### Process a completed run
 
 ```bash
