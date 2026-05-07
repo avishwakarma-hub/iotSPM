@@ -11,6 +11,18 @@ from utils.google_auth import get_drive_service
 from utils.logger import setup_logging
 
 
+STATE_REFERENCE = """\
+State reference / where to restart:
+  FILTERED              -> next stage is deviceatlas
+  DEVICEATLAS_ENRICHED  -> next stage is spm
+  SPM_CHECKED           -> next stage is report
+  REPORTED              -> next stage is upload/completed
+  COMPLETED             -> done
+  RUNDECK_FAILED        -> Rundeck failed, usually cannot process
+  FAILED                -> failed somewhere, check error/logs
+"""
+
+
 def build_app(config_path: str):
     cfg = load_config(config_path)
     ensure_directories(cfg)
@@ -20,7 +32,11 @@ def build_app(config_path: str):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="iotSPM Zscaler UA → DeviceAtlas → SPM review pipeline")
+    parser = argparse.ArgumentParser(
+        description="iotSPM Zscaler UA → DeviceAtlas → SPM review pipeline",
+        epilog=STATE_REFERENCE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--config", default="config/settings.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -36,7 +52,12 @@ def main() -> None:
     p = sub.add_parser("poll-active", help="Poll all active Rundeck runs; useful from cron")
     p.add_argument("--auto-process", action="store_true", help="Process succeeded runs automatically")
 
-    process = sub.add_parser("process", help="Process or restart a completed run")
+    process = sub.add_parser(
+        "process",
+        help="Process or restart a completed run",
+        epilog=STATE_REFERENCE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     process.add_argument("run_id", type=int)
     process.add_argument("--from-stage", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Rebuild this stage and every later stage; reuse earlier artifacts")
     process.add_argument("--force-stage", action="append", default=[], choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload", "all"], help="Rebuild a specific stage even when its artifact exists. Can be repeated.")
@@ -50,7 +71,12 @@ def main() -> None:
     p = sub.add_parser("download-drive", help="Download a Google Drive file by id")
     p.add_argument("file_id")
 
-    p = sub.add_parser("status", help="Show latest runs")
+    p = sub.add_parser(
+        "status",
+        help="Show latest runs",
+        epilog=STATE_REFERENCE,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--limit", type=int, default=20)
 
     args = parser.parse_args()

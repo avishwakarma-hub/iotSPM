@@ -238,6 +238,28 @@ Failure emails include the last completed stage, error message, and a suggested
 restart command. `python run.py status --limit 20` also shows `last_stage` and
 the final report path when available.
 
+### State reference / where to restart
+
+Use the `state` shown by `python run.py status --limit 20` to decide the next
+safe restart point:
+
+```text
+FILTERED              -> next stage is deviceatlas
+DEVICEATLAS_ENRICHED  -> next stage is spm
+SPM_CHECKED           -> next stage is report
+REPORTED              -> next stage is upload/completed
+COMPLETED             -> done
+RUNDECK_FAILED        -> Rundeck failed, usually cannot process
+FAILED                -> failed somewhere, check error/logs
+```
+
+Example:
+
+```bash
+# If state=DEVICEATLAS_ENRICHED, continue with SPM and later stages
+python run.py process <run_id> --from-stage spm
+```
+
 ### Process a local `.current` or `.csv` file
 
 ```bash
