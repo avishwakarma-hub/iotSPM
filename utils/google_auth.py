@@ -6,6 +6,7 @@ from typing import Any, Dict
 from urllib.parse import parse_qs, urlparse
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -69,7 +70,18 @@ def get_drive_service(cfg: Dict[str, Any]):
         creds = Credentials.from_authorized_user_file(str(token_file), scopes)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError:
+                # Scope changes (for example enabling report upload and moving
+                # from drive.readonly to drive.file) can make an existing token
+                # unusable. Re-run manual OAuth instead of failing unattended.
+                if token_file.exists():
+                    token_file.unlink()
+                if not credentials_file.exists():
+                    raise FileNotFoundError(f"Google OAuth credentials file not found: {credentials_file}")
+                flow = InstalledAppFlow.from_client_secrets_file(str(credentials_file), scopes)
+                creds = _manual_oauth(flow)
         else:
             if not credentials_file.exists():
                 raise FileNotFoundError(f"Google OAuth credentials file not found: {credentials_file}")

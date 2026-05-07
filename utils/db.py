@@ -48,7 +48,12 @@ class Database:
                     csv_path TEXT,
                     cleaned_path TEXT,
                     enriched_path TEXT,
+                    spm_path TEXT,
+                    report_path TEXT,
                     report_dir TEXT,
+                    uploaded_report_file_id TEXT,
+                    uploaded_report_link TEXT,
+                    last_stage TEXT,
                     stats_json TEXT DEFAULT '{}',
                     error_message TEXT,
                     created_at TEXT NOT NULL,
@@ -93,6 +98,28 @@ class Database:
                 );
                 """
             )
+            self._migrate_runs_table(conn)
+
+    @staticmethod
+    def _migrate_runs_table(conn: sqlite3.Connection) -> None:
+        """Add columns introduced after the initial schema.
+
+        SQLite supports very small, safe ALTER TABLE migrations. Keeping this
+        here lets long-lived server installs upgrade in place without deleting
+        the existing run history or DeviceAtlas/SPM caches.
+        """
+
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        required_columns = {
+            "spm_path": "TEXT",
+            "report_path": "TEXT",
+            "uploaded_report_file_id": "TEXT",
+            "uploaded_report_link": "TEXT",
+            "last_stage": "TEXT",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {column_name} {column_type}")
 
     def create_run(self, run_date: str, query_name: str, query: str, start: str, end: str) -> int:
         now = utcnow()

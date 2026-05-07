@@ -19,7 +19,7 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
     ws.title = "IoT UA Review"
     headers = [
         "Priority", "Hits", "Group Size", "Hardware Type", "Vendor", "Model", "Marketing Name",
-        "SPM Status", "Action", "Suggested Signature Seed", "User-Agent",
+        "Candidate Reason", "SPM Status", "Action", "Suggested Signature Seed", "User-Agent",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -37,6 +37,7 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
             row.get("device_vendor", ""),
             row.get("device_model", ""),
             row.get("marketing_name", ""),
+            row.get("iot_candidate_reason", ""),
             status,
             action,
             _signature_seed(row.get("user_agent", "")),

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Optional
 
+from pipeline.artifacts import path_exists, should_reuse_artifact
 from pipeline.stage1_rundeck import RundeckClient, day_window
 from pipeline.stage2_download import download_drive_file
 from pipeline.stage3_convert import convert_to_csv_if_needed
@@ -10,8 +11,21 @@ from pipeline.stage4_filter import filter_and_dedupe
 from pipeline.stage5_deviceatlas import enrich_with_deviceatlas
 from pipeline.stage6_spm import run_spm_check
 from pipeline.stage7_report import build_review_report
+from pipeline.stage8_upload import upload_report_if_enabled
 from utils.db import Database
 from utils.notifier import Notifier
+
+
+STAGE_ORDER = ["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"]
+STAGE_STATE = {
+    "download": "DOWNLOADED",
+    "convert": "CONVERTED",
+    "filter": "FILTERED",
+    "deviceatlas": "DEVICEATLAS_ENRICHED",
+    "spm": "SPM_CHECKED",
+    "report": "REPORTED",
+    "upload": "UPLOADED",
+}
 
 
 class PipelineOrchestrator:
@@ -72,35 +86,69 @@ class PipelineOrchestrator:
                 self.logger.exception("Active poll failed for run %s", run_id)
                 self.notifier.send("iotSPM active poll failed", f"Run {run_id} failed during active polling:\n{exc}")
 
-    def process_ready_run(self, run_id: int) -> Path:
+    def process_ready_run(
+        self,
+        run_id: int,
+        *,
+        from_stage: Optional[str] = None,
+        force_stages: Optional[Iterable[str]] = None,
+        stop_after: Optional[str] = None,
+    ) -> Path:
+        force_set = {stage.strip().lower() for stage in (force_stages or []) if stage.strip()}
+        if "all" in force_set:
+            force_set = set(STAGE_ORDER)
+        if from_stage:
+            from_stage = from_stage.lower()
+            self._validate_stage(from_stage)
+            force_set.update(STAGE_ORDER[STAGE_ORDER.index(from_stage) :])
+        if stop_after:
+            stop_after = stop_after.lower()
+            self._validate_stage(stop_after)
+
         run = self._run(run_id)
         if not run["drive_file_id"] and not run["raw_path"]:
             raise RuntimeError("Run does not have a Drive file or raw path yet. Poll until Rundeck succeeds.")
 
-        raw_path = Path(run["raw_path"]) if run["raw_path"] else download_drive_file(self.cfg, run["drive_file_id"])
-        self.db.update_run(run_id, raw_path=str(raw_path), state="DOWNLOADED")
-        self.logger.info("Run %s downloaded/raw file: %s", run_id, raw_path)
+        try:
+            raw_path = self._stage_download(run_id, run, force="download" in force_set)
+            if self._should_stop(stop_after, "download"):
+                return raw_path
 
-        csv_path = convert_to_csv_if_needed(self.cfg, raw_path)
-        self.db.update_run(run_id, csv_path=str(csv_path), state="CONVERTED")
-        self.logger.info("Run %s CSV file: %s", run_id, csv_path)
+            run = self._run(run_id)
+            csv_path = self._stage_convert(run_id, raw_path, run, force="convert" in force_set)
+            if self._should_stop(stop_after, "convert"):
+                return csv_path
 
-        cleaned_path, filter_stats = filter_and_dedupe(self.cfg, csv_path)
-        self.db.update_run(run_id, cleaned_path=str(cleaned_path), state="FILTERED", stats_json=filter_stats)
-        self.logger.info("Run %s cleaned file: %s stats=%s", run_id, cleaned_path, filter_stats)
+            run = self._run(run_id)
+            cleaned_path = self._stage_filter(run_id, csv_path, run, force="filter" in force_set)
+            if self._should_stop(stop_after, "filter"):
+                return cleaned_path
 
-        enriched_path = enrich_with_deviceatlas(self.cfg, self.db, cleaned_path)
-        self.db.update_run(run_id, enriched_path=str(enriched_path), state="DEVICEATLAS_ENRICHED")
-        self.logger.info("Run %s enriched file: %s", run_id, enriched_path)
+            run = self._run(run_id)
+            enriched_path = self._stage_deviceatlas(run_id, cleaned_path, run, force="deviceatlas" in force_set)
+            if self._should_stop(stop_after, "deviceatlas"):
+                return enriched_path
 
-        if self.cfg.get("spm", {}).get("enabled", True):
-            spm_path = run_spm_check(self.cfg, self.db, enriched_path)
-        else:
-            spm_path = enriched_path
-        report_path = build_review_report(self.cfg, spm_path)
-        self.db.update_run(run_id, report_dir=str(report_path.parent), status="completed", state="COMPLETED")
-        self.notifier.send("iotSPM pipeline completed", f"Run {run_id} completed. Review report:\n{report_path}")
-        return report_path
+            run = self._run(run_id)
+            spm_path = self._stage_spm(run_id, enriched_path, run, force="spm" in force_set)
+            if self._should_stop(stop_after, "spm"):
+                return spm_path
+
+            run = self._run(run_id)
+            report_path = self._stage_report(run_id, spm_path, run, force="report" in force_set)
+            if self._should_stop(stop_after, "report"):
+                return report_path
+
+            run = self._run(run_id)
+            self._stage_upload(run_id, report_path, run, force="upload" in force_set)
+            self.db.update_run(run_id, status="completed", state="COMPLETED", last_stage="completed", report_dir=str(report_path.parent))
+            self.notifier.send("iotSPM pipeline completed", self._completion_body(run_id, report_path))
+            return report_path
+        except Exception as exc:
+            self.db.update_run(run_id, status="failed", state="FAILED", error_message=str(exc))
+            self.logger.exception("Run %s failed during processing", run_id)
+            self.notifier.send("iotSPM pipeline failed", self._failure_body(run_id, exc))
+            raise
 
     def run_local_file(self, path: str | Path, day: str = "manual", query_name: str = "local_file") -> Path:
         run_id = self.db.create_run(day, query_name, "local-file", "", "")
@@ -111,7 +159,7 @@ class PipelineOrchestrator:
         for run in self.db.list_runs(limit):
             print(
                 f"#{run['id']} {run['run_date']} {run['query_name']} state={run['state']} "
-                f"status={run['status']} exec={run['execution_id']} report={run['report_dir']}"
+                f"status={run['status']} last_stage={run['last_stage']} exec={run['execution_id']} report={run['report_path'] or run['report_dir']}"
             )
 
     def _run(self, run_id: int):
@@ -119,3 +167,139 @@ class PipelineOrchestrator:
         if not run:
             raise RuntimeError(f"Run not found: {run_id}")
         return run
+
+    def _stage_download(self, run_id: int, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["raw_path"], force=force):
+            raw_path = Path(run["raw_path"])
+            self.logger.info("Run %s reusing raw file: %s", run_id, raw_path)
+        else:
+            if run["raw_path"] and not path_exists(run["raw_path"]):
+                raise FileNotFoundError(f"Raw/local input file not found: {run['raw_path']}")
+            if not run["drive_file_id"]:
+                raise RuntimeError("No Drive file id available for download stage")
+            raw_path = download_drive_file(self.cfg, run["drive_file_id"])
+            self.logger.info("Run %s downloaded/raw file: %s", run_id, raw_path)
+        self.db.update_run(run_id, raw_path=str(raw_path), state=STAGE_STATE["download"], last_stage="download")
+        return raw_path
+
+    def _stage_convert(self, run_id: int, raw_path: Path, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["csv_path"], force=force):
+            csv_path = Path(run["csv_path"])
+            self.logger.info("Run %s reusing CSV file: %s", run_id, csv_path)
+        else:
+            csv_path = convert_to_csv_if_needed(self.cfg, raw_path)
+            self.logger.info("Run %s CSV file: %s", run_id, csv_path)
+        self.db.update_run(run_id, csv_path=str(csv_path), state=STAGE_STATE["convert"], last_stage="convert")
+        return csv_path
+
+    def _stage_filter(self, run_id: int, csv_path: Path, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["cleaned_path"], force=force):
+            cleaned_path = Path(run["cleaned_path"])
+            self.logger.info("Run %s reusing cleaned file: %s", run_id, cleaned_path)
+            self.db.update_run(run_id, cleaned_path=str(cleaned_path), state=STAGE_STATE["filter"], last_stage="filter")
+            return cleaned_path
+        cleaned_path, filter_stats = filter_and_dedupe(self.cfg, csv_path)
+        self.db.update_run(run_id, cleaned_path=str(cleaned_path), state=STAGE_STATE["filter"], last_stage="filter", stats_json=filter_stats)
+        self.logger.info("Run %s cleaned file: %s stats=%s", run_id, cleaned_path, filter_stats)
+        return cleaned_path
+
+    def _stage_deviceatlas(self, run_id: int, cleaned_path: Path, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["enriched_path"], force=force):
+            enriched_path = Path(run["enriched_path"])
+            self.logger.info("Run %s reusing DeviceAtlas file: %s", run_id, enriched_path)
+        else:
+            enriched_path = enrich_with_deviceatlas(self.cfg, self.db, cleaned_path)
+            self.logger.info("Run %s enriched file: %s", run_id, enriched_path)
+        self.db.update_run(run_id, enriched_path=str(enriched_path), state=STAGE_STATE["deviceatlas"], last_stage="deviceatlas")
+        return enriched_path
+
+    def _stage_spm(self, run_id: int, enriched_path: Path, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["spm_path"], force=force):
+            spm_path = Path(run["spm_path"])
+            self.logger.info("Run %s reusing SPM file: %s", run_id, spm_path)
+        elif self.cfg.get("spm", {}).get("enabled", True):
+            spm_path = run_spm_check(self.cfg, self.db, enriched_path)
+            self.logger.info("Run %s SPM file: %s", run_id, spm_path)
+        else:
+            spm_path = enriched_path
+            self.logger.info("Run %s SPM disabled; report will use enriched file", run_id)
+        self.db.update_run(run_id, spm_path=str(spm_path), state=STAGE_STATE["spm"], last_stage="spm")
+        return spm_path
+
+    def _stage_report(self, run_id: int, spm_path: Path, run, *, force: bool) -> Path:
+        if should_reuse_artifact(run["report_path"], force=force):
+            report_path = Path(run["report_path"])
+            self.logger.info("Run %s reusing review report: %s", run_id, report_path)
+        else:
+            report_path = build_review_report(self.cfg, spm_path)
+            self.logger.info("Run %s review report: %s", run_id, report_path)
+        self.db.update_run(
+            run_id,
+            report_path=str(report_path),
+            report_dir=str(report_path.parent),
+            state=STAGE_STATE["report"],
+            last_stage="report",
+        )
+        return report_path
+
+    def _stage_upload(self, run_id: int, report_path: Path, run, *, force: bool) -> None:
+        if run["uploaded_report_link"] and not force:
+            self.logger.info("Run %s reusing uploaded report link: %s", run_id, run["uploaded_report_link"])
+            self.db.update_run(run_id, state=STAGE_STATE["upload"], last_stage="upload")
+            return
+        upload = upload_report_if_enabled(self.cfg, report_path)
+        updates: Dict[str, Any] = {"state": STAGE_STATE["upload"], "last_stage": "upload"}
+        if upload:
+            updates.update(uploaded_report_file_id=upload.get("file_id"), uploaded_report_link=upload.get("web_view_link"))
+            self.logger.info("Run %s uploaded review report: %s", run_id, upload.get("web_view_link"))
+        self.db.update_run(run_id, **updates)
+
+    @staticmethod
+    def _validate_stage(stage: str) -> None:
+        if stage not in STAGE_ORDER:
+            raise ValueError(f"Unsupported stage '{stage}'. Use one of: {', '.join(STAGE_ORDER)}")
+
+    @staticmethod
+    def _should_stop(stop_after: Optional[str], current_stage: str) -> bool:
+        return stop_after == current_stage
+
+    def _completion_body(self, run_id: int, report_path: Path) -> str:
+        run = self._run(run_id)
+        lines = [
+            f"Run {run_id} completed successfully.",
+            f"Review report: {report_path}",
+        ]
+        if run["uploaded_report_link"]:
+            lines.append(f"Google Drive link: {run['uploaded_report_link']}")
+        lines.extend(
+            [
+                "",
+                "Restart examples:",
+                f"python run.py process {run_id} --from-stage spm",
+                f"python run.py process {run_id} --force-stage report",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _failure_body(self, run_id: int, exc: Exception) -> str:
+        run = self._run(run_id)
+        last_stage = run["last_stage"] or "unknown"
+        next_stage = self._next_stage(last_stage)
+        lines = [
+            f"Run {run_id} failed.",
+            f"Last completed stage: {last_stage}",
+            f"Current state: {run['state']}",
+            f"Error: {exc}",
+        ]
+        if next_stage:
+            lines.extend(["", "Restart command:", f"python run.py process {run_id} --from-stage {next_stage}"])
+        else:
+            lines.extend(["", "Restart command:", f"python run.py process {run_id} --force-stage all"])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _next_stage(last_stage: str) -> Optional[str]:
+        if last_stage not in STAGE_ORDER:
+            return STAGE_ORDER[0]
+        idx = STAGE_ORDER.index(last_stage) + 1
+        return STAGE_ORDER[idx] if idx < len(STAGE_ORDER) else None

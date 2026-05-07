@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import csv
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+from pipeline.artifacts import atomic_write_rows
 from utils.config import load_yaml
 from utils.ua_normalizer import UaFilter, UaRecord, dedupe_records, read_ua_csv
 
@@ -25,14 +25,7 @@ def filter_and_dedupe(cfg: Dict[str, Any], csv_path: str | Path) -> Tuple[Path, 
     out_dir = Path(cfg["paths"]["cleaned_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"{Path(csv_path).stem}.cleaned.csv"
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["total_group_hits", "hit_count", "group_size", "group_key", "user_agent"],
-        )
-        writer.writeheader()
-        for item in grouped:
-            writer.writerow(item)
+    atomic_write_rows(output_path, grouped, ["total_group_hits", "hit_count", "group_size", "group_key", "user_agent"])
     stats = {
         "input_records": len(records),
         "pre_deviceatlas_kept": len(kept),

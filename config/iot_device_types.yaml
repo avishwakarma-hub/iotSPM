@@ -33,3 +33,32 @@ reject:
   - Desktop
   - Mobile Phone
   - Tablet
+
+# Some enterprise / rugged / conferencing Android devices are either returned
+# by DeviceAtlas with blank hardware metadata or classified as Mobile Phone.
+# These rules rescue high-value IoT candidates after DeviceAtlas enrichment
+# without admitting generic consumer phones/tablets.
+rescue_model_regex:
+  - '(?i)\bTC5[238]?\w*\b'          # Zebra TC52/TC53/TC58
+  - '(?i)\bTC7[27]\w*\b'            # Zebra TC72/TC77
+  - '(?i)\bWT6[0-9]{3}\w*\b'        # Zebra wearable terminals
+  - '(?i)\bMC18N0\w*\b'             # Zebra/Motorola mobile computer
+  - '(?i)\bCT4[57][A-Z0-9-]*\b'     # Honeywell CT45/CT47
+  - '(?i)\bFZ-N1\b'                 # Panasonic Toughpad handheld
+  - '(?i)\bMeetingBar\s*A40\b'      # Yealink/meeting bar style UAs
+  - '(?i)\bCCX[0-9]{3}\b'           # Poly CCX phones
+  - '(?i)\bC455HD\b'                # AudioCodes IP phone
+  - '(?i)\bMT9950\b'                # Smart TV / board model
+  - '(?i)\bVR[0-9]{4}\b'            # VR devices
+  - '(?i)\bVIVE\s+Focus\b'          # HTC Vive Focus
+  - '(?i)\bLDLIM20\b'
+
+rescue_vendor_model_regex:
+  - vendor: '(?i)^Panasonic$'
+    model: '(?i)^FZ-'
+  - vendor: '(?i)^Samsung$'
+    model: '(?i)^SM-G556'           # Galaxy XCover rugged line
+
+rescue_hardware_regex:
+  - '(?i)\bToughpad\b'
+  - '(?i)\bGalaxy\s+Xcover\b'

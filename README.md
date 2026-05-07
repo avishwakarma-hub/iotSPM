@@ -217,11 +217,55 @@ When status becomes `succeeded`, the pipeline stores the Google Drive file id if
 python run.py process <run_id>
 ```
 
+The processor is resumable. Each stage records its artifact path in SQLite and
+will reuse that file on the next run unless you force a rebuild.
+
+```bash
+# Rebuild SPM, report, and upload only; reuse raw/csv/cleaned/DeviceAtlas files
+python run.py process <run_id> --from-stage spm
+
+# Rebuild only the Excel report from the existing SPM CSV
+python run.py process <run_id> --force-stage report
+
+# Rebuild everything from the downloaded/raw file onward
+python run.py process <run_id> --from-stage convert
+
+# Debug/review an intermediate artifact and stop
+python run.py process <run_id> --stop-after deviceatlas
+```
+
+Failure emails include the last completed stage, error message, and a suggested
+restart command. `python run.py status --limit 20` also shows `last_stage` and
+the final report path when available.
+
 ### Process a local `.current` or `.csv` file
 
 ```bash
 python run.py run-local /path/to/report.current --day 2026-01-01
 python run.py run-local /path/to/report.csv --day 2026-01-01
+python run.py run-local /path/to/report.csv --day 2026-01-01 --stop-after filter
+```
+
+### Optional upload of the final Excel report
+
+By default final XLSX reports are stored locally under `data/reports/`. To also
+upload them to Google Drive, enable this in `config/settings.local.yaml` and use
+a write-capable Drive scope:
+
+```yaml
+google_drive:
+  scopes:
+    - https://www.googleapis.com/auth/drive.file
+
+report_upload:
+  enabled: true
+  folder_id: <optional-drive-folder-id>
+```
+
+Then re-run OAuth once because the token scope changed:
+
+```bash
+python run.py auth-drive
 ```
 
 ### Show latest runs

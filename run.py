@@ -24,24 +24,28 @@ def main() -> None:
     parser.add_argument("--config", default="config/settings.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("auth-drive", help="Perform one-time Google Drive OAuth auth")
+    sub.add_parser("auth-drive", help="Perform one-time Google Drive OAuth auth")
 
     p = sub.add_parser("submit", help="Submit a Rundeck query for one day")
     p.add_argument("--day", required=True, help="YYYY-MM-DD")
     p.add_argument("--query", default="build_only", help="Query name from config/settings.yaml")
 
-    p = sub.add_parser("poll", help="Poll Rundeck status for a run")
+    p = sub.add_parser("poll", help="Poll one Rundeck run")
     p.add_argument("run_id", type=int)
 
     p = sub.add_parser("poll-active", help="Poll all active Rundeck runs; useful from cron")
     p.add_argument("--auto-process", action="store_true", help="Process succeeded runs automatically")
 
-    p = sub.add_parser("process", help="Download/process a completed run")
-    p.add_argument("run_id", type=int)
+    process = sub.add_parser("process", help="Process or restart a completed run")
+    process.add_argument("run_id", type=int)
+    process.add_argument("--from-stage", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Rebuild this stage and every later stage; reuse earlier artifacts")
+    process.add_argument("--force-stage", action="append", default=[], choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload", "all"], help="Rebuild a specific stage even when its artifact exists. Can be repeated.")
+    process.add_argument("--stop-after", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Stop after a stage for debugging/review")
 
-    p = sub.add_parser("run-local", help="Process an existing .current or .csv file")
-    p.add_argument("path")
-    p.add_argument("--day", default="manual")
+    local = sub.add_parser("run-local", help="Process an existing .current or .csv file")
+    local.add_argument("path")
+    local.add_argument("--day", default="manual")
+    local.add_argument("--stop-after", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Stop after a stage for debugging/review")
 
     p = sub.add_parser("download-drive", help="Download a Google Drive file by id")
     p.add_argument("file_id")
@@ -66,9 +70,22 @@ def main() -> None:
     elif args.cmd == "poll-active":
         app.poll_active(auto_process=args.auto_process)
     elif args.cmd == "process":
-        print(app.process_ready_run(args.run_id))
+        print(
+            app.process_ready_run(
+                args.run_id,
+                from_stage=args.from_stage,
+                force_stages=args.force_stage,
+                stop_after=args.stop_after,
+            )
+        )
     elif args.cmd == "run-local":
-        print(app.run_local_file(Path(args.path), day=args.day))
+        if args.stop_after:
+            db = Database(cfg["paths"]["db_path"])
+            run_id = db.create_run(args.day, "local_file", "local-file", "", "")
+            db.update_run(run_id, raw_path=str(Path(args.path)), status="local", state="LOCAL_FILE")
+            print(app.process_ready_run(run_id, stop_after=args.stop_after))
+        else:
+            print(app.run_local_file(Path(args.path), day=args.day))
     elif args.cmd == "download-drive":
         print(download_drive_file(cfg, args.file_id))
     elif args.cmd == "status":

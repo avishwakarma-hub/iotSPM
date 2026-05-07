@@ -62,6 +62,14 @@ google_drive:
   scopes:
     - https://www.googleapis.com/auth/drive.readonly
 
+report_upload:
+  enabled: false
+  # Optional. Requires a write-capable Google Drive scope such as:
+  # google_drive.scopes:
+  #   - https://www.googleapis.com/auth/drive.file
+  folder_id: ""
+  filename: ""
+
 filtering:
   min_ua_length: 5
   max_ua_length: 1000

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from pipeline.artifacts import atomic_write_rows
 from utils.config import load_yaml
 from utils.db import Database
 from utils.ua_normalizer import ua_hash
@@ -156,11 +158,12 @@ class DeviceAtlasMapper:
 
 def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str | Path) -> Path:
     mapper = DeviceAtlasMapper(cfg, db)
-    iot_types = load_yaml("config/iot_device_types.yaml")
-    keep_types = {item.lower() for item in iot_types.get("keep", [])}
-    reject_types = {item.lower() for item in iot_types.get("reject", [])}
+    classifier = IotCandidateClassifier(load_yaml("config/iot_device_types.yaml"))
     rows = _read_dicts(cleaned_path)
     workers = int(cfg.get("deviceatlas", {}).get("workers", 4))
+    out_dir = Path(cfg["paths"]["enriched_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{Path(cleaned_path).stem}.deviceatlas.csv"
 
     enriched: List[Dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -169,8 +172,7 @@ def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str
             row = future_map[future]
             props = future.result()
             hardware = str(props.get("primaryHardwareType", "") or "")
-            is_rejected = hardware.lower() in reject_types
-            is_iot = hardware.lower() in keep_types and not is_rejected
+            is_iot, iot_reason = classifier.classify(row.get("user_agent", ""), props)
             row.update(
                 {
                     "device_vendor": props.get("vendor", ""),
@@ -184,30 +186,93 @@ def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str
                     "is_tablet": props.get("isTablet", ""),
                     "is_robot": props.get("isRobot", ""),
                     "is_iot_candidate": "yes" if is_iot else "no",
+                    "iot_candidate_reason": iot_reason,
                     "deviceatlas_json": json.dumps(props, ensure_ascii=False),
                 }
             )
             enriched.append(row)
 
     enriched.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
-    out_dir = Path(cfg["paths"]["enriched_dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"{Path(cleaned_path).stem}.deviceatlas.csv"
     fieldnames = [
         "total_group_hits", "hit_count", "group_size", "group_key", "device_vendor", "device_model",
         "marketing_name", "hardware_type", "browser_name", "os_name", "os_version", "is_mobile_phone",
-        "is_tablet", "is_robot", "is_iot_candidate", "user_agent", "deviceatlas_json",
+        "is_tablet", "is_robot", "is_iot_candidate", "iot_candidate_reason", "user_agent", "deviceatlas_json",
     ]
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(enriched)
+    atomic_write_rows(output_path, enriched, fieldnames)
     return output_path
+
+
+class IotCandidateClassifier:
+    def __init__(self, rules: Dict[str, Any]):
+        self.keep_types = {str(item).lower() for item in rules.get("keep", [])}
+        self.reject_types = {str(item).lower() for item in rules.get("reject", [])}
+        self.rescue_model_regex = _compile_regexes(rules.get("rescue_model_regex", []))
+        self.rescue_hardware_regex = _compile_regexes(rules.get("rescue_hardware_regex", []))
+        self.rescue_vendor_model_regex = [
+            (re.compile(str(item.get("vendor", ""))), re.compile(str(item.get("model", ""))))
+            for item in rules.get("rescue_vendor_model_regex", [])
+            if item.get("vendor") and item.get("model")
+        ]
+
+    def classify(self, user_agent: str, props: Dict[str, Any]) -> Tuple[bool, str]:
+        hardware = str(props.get("primaryHardwareType", "") or "")
+        hardware_l = hardware.lower()
+        if hardware_l in self.keep_types:
+            return True, f"deviceatlas_keep:{hardware}"
+
+        if hardware_l in self.reject_types and not self._has_rescue_signal(user_agent, props):
+            return False, f"deviceatlas_reject:{hardware}"
+
+        if self._has_rescue_signal(user_agent, props):
+            return True, "rescue_rule"
+
+        return False, "not_iot_candidate"
+
+    def _has_rescue_signal(self, user_agent: str, props: Dict[str, Any]) -> bool:
+        model_text = " ".join(
+            str(value or "")
+            for value in [
+                props.get("model"),
+                props.get("marketingName"),
+                _extract_android_model(user_agent),
+                user_agent,
+            ]
+        )
+        if any(pattern.search(model_text) for pattern in self.rescue_model_regex):
+            return True
+
+        hardware_text = " ".join(str(value or "") for value in [props.get("marketingName"), props.get("model"), user_agent])
+        if any(pattern.search(hardware_text) for pattern in self.rescue_hardware_regex):
+            return True
+
+        vendor = str(props.get("vendor", "") or "")
+        model = " ".join(str(value or "") for value in [props.get("model"), props.get("marketingName"), _extract_android_model(user_agent)])
+        return any(vendor_re.search(vendor) and model_re.search(model) for vendor_re, model_re in self.rescue_vendor_model_regex)
 
 
 def _read_dicts(path: str | Path) -> List[Dict[str, Any]]:
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _compile_regexes(patterns: List[Any]) -> List[re.Pattern[str]]:
+    return [re.compile(str(pattern)) for pattern in patterns if str(pattern or "").strip()]
+
+
+def _extract_android_model(user_agent: str) -> str:
+    patterns = [
+        r"Android\s+[0-9.]+;\s*([^;)]+?)\s+Build/",
+        r"Android\s+[0-9.]+;\s*([^;)]+?);\s*Build/",
+        r";\s*([^;()]+?)\s+Build/",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, user_agent, re.I)
+        if not match:
+            continue
+        model = match.group(1).strip()
+        model = re.sub(r"^(U;|en[-_][A-Z]+;|[a-z]{2};)\s*", "", model, flags=re.I)
+        return re.sub(r"\s+", " ", model)
+    return ""
 
 
 def _json_safe(value: Any) -> Any:

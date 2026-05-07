@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 
+from pipeline.artifacts import atomic_write_rows
 from utils.db import Database
 from utils.ua_normalizer import ua_hash
 
@@ -87,6 +88,9 @@ def run_spm_check(cfg: Dict[str, Any], db: Database, enriched_path: str | Path) 
     rows = [row for row in rows if row.get("is_iot_candidate") == "yes"]
     analyzer = SpmAnalyzer(cfg, db)
     workers = int(cfg.get("spm", {}).get("workers", 10))
+    out_dir = Path(cfg["paths"]["reports_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"{Path(enriched_path).stem}.spm.csv"
 
     output_rows: List[Dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -100,17 +104,11 @@ def run_spm_check(cfg: Dict[str, Any], db: Database, enriched_path: str | Path) 
             output_rows.append(row)
 
     output_rows.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
-    out_dir = Path(cfg["paths"]["reports_dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    output_path = out_dir / f"{Path(enriched_path).stem}.spm.csv"
     fieldnames = [
         "total_group_hits", "hit_count", "group_size", "hardware_type", "device_vendor", "device_model",
-        "marketing_name", "spm_detection_status", "spm_match_count", "user_agent", "spm_matches_json",
+        "marketing_name", "iot_candidate_reason", "spm_detection_status", "spm_match_count", "user_agent", "spm_matches_json",
     ]
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
+    atomic_write_rows(output_path, output_rows, fieldnames)
     return output_path
 
 
