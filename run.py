@@ -9,6 +9,7 @@ from utils.config import ensure_directories, load_config
 from utils.db import Database
 from utils.google_auth import get_drive_service
 from utils.logger import setup_logging
+from utils.progress import progress_from_config
 
 
 STATE_REFERENCE = """\
@@ -40,6 +41,13 @@ def main() -> None:
     parser.add_argument("--config", default="config/settings.yaml")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    def add_verbose_flag(subparser):
+        subparser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Show stage progress and throttled progress bars for long-running stages",
+        )
+
     sub.add_parser("auth-drive", help="Perform one-time Google Drive OAuth auth")
 
     p = sub.add_parser("submit", help="Submit a Rundeck query for one day")
@@ -51,6 +59,7 @@ def main() -> None:
 
     p = sub.add_parser("poll-active", help="Poll all active Rundeck runs; useful from cron")
     p.add_argument("--auto-process", action="store_true", help="Process succeeded runs automatically")
+    add_verbose_flag(p)
 
     process = sub.add_parser(
         "process",
@@ -62,11 +71,13 @@ def main() -> None:
     process.add_argument("--from-stage", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Rebuild this stage and every later stage; reuse earlier artifacts")
     process.add_argument("--force-stage", action="append", default=[], choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload", "all"], help="Rebuild a specific stage even when its artifact exists. Can be repeated.")
     process.add_argument("--stop-after", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Stop after a stage for debugging/review")
+    add_verbose_flag(process)
 
     local = sub.add_parser("run-local", help="Process an existing .current or .csv file")
     local.add_argument("path")
     local.add_argument("--day", default="manual")
     local.add_argument("--stop-after", choices=["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"], help="Stop after a stage for debugging/review")
+    add_verbose_flag(local)
 
     p = sub.add_parser("download-drive", help="Download a Google Drive file by id")
     p.add_argument("file_id")
@@ -81,6 +92,9 @@ def main() -> None:
 
     args = parser.parse_args()
     cfg, logger, app = build_app(args.config)
+    if getattr(args, "verbose", False):
+        cfg.setdefault("runtime", {}).setdefault("progress", {})["enabled"] = True
+        app.set_progress(progress_from_config(cfg))
 
     if args.cmd == "auth-drive":
         service = get_drive_service(cfg)

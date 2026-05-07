@@ -14,6 +14,7 @@ from pipeline.stage7_report import build_review_report
 from pipeline.stage8_upload import upload_report_if_enabled
 from utils.db import Database
 from utils.notifier import Notifier
+from utils.progress import ProgressReporter, progress_from_config
 
 
 STAGE_ORDER = ["download", "convert", "filter", "deviceatlas", "spm", "report", "upload"]
@@ -34,6 +35,10 @@ class PipelineOrchestrator:
         self.db = db
         self.logger = logger
         self.notifier = Notifier(cfg, logger)
+        self.progress = progress_from_config(cfg)
+
+    def set_progress(self, progress: ProgressReporter) -> None:
+        self.progress = progress
 
     def submit(self, day: str, query_name: str = "build_only") -> int:
         query = self.cfg["rundeck"]["queries"][query_name]
@@ -110,6 +115,7 @@ class PipelineOrchestrator:
             raise RuntimeError("Run does not have a Drive file or raw path yet. Poll until Rundeck succeeds.")
 
         try:
+            self.progress.stage("pipeline", f"run_id={run_id}")
             raw_path = self._stage_download(run_id, run, force="download" in force_set)
             if self._should_stop(stop_after, "download"):
                 return raw_path
@@ -142,6 +148,7 @@ class PipelineOrchestrator:
             run = self._run(run_id)
             self._stage_upload(run_id, report_path, run, force="upload" in force_set)
             self.db.update_run(run_id, status="completed", state="COMPLETED", last_stage="completed", report_dir=str(report_path.parent))
+            self.progress.done("pipeline", f"report={report_path}")
             self.notifier.send("iotSPM pipeline completed", self._completion_body(run_id, report_path))
             return report_path
         except Exception as exc:
@@ -169,6 +176,7 @@ class PipelineOrchestrator:
         return run
 
     def _stage_download(self, run_id: int, run, *, force: bool) -> Path:
+        self.progress.stage("download", "reuse existing artifact" if should_reuse_artifact(run["raw_path"], force=force) else "download from Drive/local input")
         if should_reuse_artifact(run["raw_path"], force=force):
             raw_path = Path(run["raw_path"])
             self.logger.info("Run %s reusing raw file: %s", run_id, raw_path)
@@ -180,9 +188,11 @@ class PipelineOrchestrator:
             raw_path = download_drive_file(self.cfg, run["drive_file_id"])
             self.logger.info("Run %s downloaded/raw file: %s", run_id, raw_path)
         self.db.update_run(run_id, raw_path=str(raw_path), state=STAGE_STATE["download"], last_stage="download")
+        self.progress.done("download", str(raw_path))
         return raw_path
 
     def _stage_convert(self, run_id: int, raw_path: Path, run, *, force: bool) -> Path:
+        self.progress.stage("convert", "reuse existing artifact" if should_reuse_artifact(run["csv_path"], force=force) else "convert .current to CSV if needed")
         if should_reuse_artifact(run["csv_path"], force=force):
             csv_path = Path(run["csv_path"])
             self.logger.info("Run %s reusing CSV file: %s", run_id, csv_path)
@@ -190,43 +200,52 @@ class PipelineOrchestrator:
             csv_path = convert_to_csv_if_needed(self.cfg, raw_path)
             self.logger.info("Run %s CSV file: %s", run_id, csv_path)
         self.db.update_run(run_id, csv_path=str(csv_path), state=STAGE_STATE["convert"], last_stage="convert")
+        self.progress.done("convert", str(csv_path))
         return csv_path
 
     def _stage_filter(self, run_id: int, csv_path: Path, run, *, force: bool) -> Path:
+        self.progress.stage("filter", "reuse existing artifact" if should_reuse_artifact(run["cleaned_path"], force=force) else "clean, reject obvious non-IoT, and dedupe UA variants")
         if should_reuse_artifact(run["cleaned_path"], force=force):
             cleaned_path = Path(run["cleaned_path"])
             self.logger.info("Run %s reusing cleaned file: %s", run_id, cleaned_path)
             self.db.update_run(run_id, cleaned_path=str(cleaned_path), state=STAGE_STATE["filter"], last_stage="filter")
+            self.progress.done("filter", str(cleaned_path))
             return cleaned_path
         cleaned_path, filter_stats = filter_and_dedupe(self.cfg, csv_path)
         self.db.update_run(run_id, cleaned_path=str(cleaned_path), state=STAGE_STATE["filter"], last_stage="filter", stats_json=filter_stats)
         self.logger.info("Run %s cleaned file: %s stats=%s", run_id, cleaned_path, filter_stats)
+        self.progress.done("filter", f"{cleaned_path} stats={filter_stats}")
         return cleaned_path
 
     def _stage_deviceatlas(self, run_id: int, cleaned_path: Path, run, *, force: bool) -> Path:
+        self.progress.stage("deviceatlas", "reuse existing artifact" if should_reuse_artifact(run["enriched_path"], force=force) else "enrich UAs with DeviceAtlas")
         if should_reuse_artifact(run["enriched_path"], force=force):
             enriched_path = Path(run["enriched_path"])
             self.logger.info("Run %s reusing DeviceAtlas file: %s", run_id, enriched_path)
         else:
-            enriched_path = enrich_with_deviceatlas(self.cfg, self.db, cleaned_path)
+            enriched_path = enrich_with_deviceatlas(self.cfg, self.db, cleaned_path, progress=self.progress)
             self.logger.info("Run %s enriched file: %s", run_id, enriched_path)
         self.db.update_run(run_id, enriched_path=str(enriched_path), state=STAGE_STATE["deviceatlas"], last_stage="deviceatlas")
+        self.progress.done("deviceatlas", str(enriched_path))
         return enriched_path
 
     def _stage_spm(self, run_id: int, enriched_path: Path, run, *, force: bool) -> Path:
+        self.progress.stage("spm", "reuse existing artifact" if should_reuse_artifact(run["spm_path"], force=force) else "check Z-Intel/SPM coverage")
         if should_reuse_artifact(run["spm_path"], force=force):
             spm_path = Path(run["spm_path"])
             self.logger.info("Run %s reusing SPM file: %s", run_id, spm_path)
         elif self.cfg.get("spm", {}).get("enabled", True):
-            spm_path = run_spm_check(self.cfg, self.db, enriched_path)
+            spm_path = run_spm_check(self.cfg, self.db, enriched_path, progress=self.progress)
             self.logger.info("Run %s SPM file: %s", run_id, spm_path)
         else:
             spm_path = enriched_path
             self.logger.info("Run %s SPM disabled; report will use enriched file", run_id)
         self.db.update_run(run_id, spm_path=str(spm_path), state=STAGE_STATE["spm"], last_stage="spm")
+        self.progress.done("spm", str(spm_path))
         return spm_path
 
     def _stage_report(self, run_id: int, spm_path: Path, run, *, force: bool) -> Path:
+        self.progress.stage("report", "reuse existing artifact" if should_reuse_artifact(run["report_path"], force=force) else "build Excel review report")
         if should_reuse_artifact(run["report_path"], force=force):
             report_path = Path(run["report_path"])
             self.logger.info("Run %s reusing review report: %s", run_id, report_path)
@@ -240,12 +259,15 @@ class PipelineOrchestrator:
             state=STAGE_STATE["report"],
             last_stage="report",
         )
+        self.progress.done("report", str(report_path))
         return report_path
 
     def _stage_upload(self, run_id: int, report_path: Path, run, *, force: bool) -> None:
+        self.progress.stage("upload", "reuse existing link" if run["uploaded_report_link"] and not force else "upload if enabled")
         if run["uploaded_report_link"] and not force:
             self.logger.info("Run %s reusing uploaded report link: %s", run_id, run["uploaded_report_link"])
             self.db.update_run(run_id, state=STAGE_STATE["upload"], last_stage="upload")
+            self.progress.done("upload", run["uploaded_report_link"])
             return
         upload = upload_report_if_enabled(self.cfg, report_path)
         updates: Dict[str, Any] = {"state": STAGE_STATE["upload"], "last_stage": "upload"}
@@ -253,6 +275,7 @@ class PipelineOrchestrator:
             updates.update(uploaded_report_file_id=upload.get("file_id"), uploaded_report_link=upload.get("web_view_link"))
             self.logger.info("Run %s uploaded review report: %s", run_id, upload.get("web_view_link"))
         self.db.update_run(run_id, **updates)
+        self.progress.done("upload", upload.get("web_view_link") if upload else "upload disabled/not configured")
 
     @staticmethod
     def _validate_stage(stage: str) -> None:

@@ -10,6 +10,7 @@ import requests
 
 from pipeline.artifacts import atomic_write_rows
 from utils.db import Database
+from utils.progress import ProgressReporter
 from utils.ua_normalizer import ua_hash
 
 
@@ -83,7 +84,12 @@ def _is_iot_sig(title: str) -> bool:
     )
 
 
-def run_spm_check(cfg: Dict[str, Any], db: Database, enriched_path: str | Path) -> Path:
+def run_spm_check(
+    cfg: Dict[str, Any],
+    db: Database,
+    enriched_path: str | Path,
+    progress: ProgressReporter | None = None,
+) -> Path:
     rows = _read_dicts(enriched_path)
     rows = [row for row in rows if row.get("is_iot_candidate") == "yes"]
     analyzer = SpmAnalyzer(cfg, db)
@@ -93,15 +99,20 @@ def run_spm_check(cfg: Dict[str, Any], db: Database, enriched_path: str | Path) 
     output_path = out_dir / f"{Path(enriched_path).stem}.spm.csv"
 
     output_rows: List[Dict[str, Any]] = []
+    if progress:
+        progress.info("spm", f"checking {len(rows)} IoT candidate UA groups with {workers} workers")
+        progress.update("spm", 0, len(rows), force=True)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(analyzer.analyze, row["user_agent"]): row for row in rows}
-        for future in as_completed(future_map):
+        for completed, future in enumerate(as_completed(future_map), start=1):
             row = future_map[future]
             status, matches = future.result()
             row["spm_detection_status"] = status
             row["spm_match_count"] = len(matches)
             row["spm_matches_json"] = json.dumps(matches, ensure_ascii=False)
             output_rows.append(row)
+            if progress:
+                progress.update("spm", completed, len(rows), status)
 
     output_rows.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
     fieldnames = [

@@ -217,6 +217,13 @@ When status becomes `succeeded`, the pipeline stores the Google Drive file id if
 python run.py process <run_id>
 ```
 
+For long stages like DeviceAtlas mapping and SPM checks, add `--verbose` to see
+stage start/done messages and throttled progress bars:
+
+```bash
+python run.py process <run_id> --from-stage spm --verbose
+```
+
 The processor is resumable. Each stage records its artifact path in SQLite and
 will reuse that file on the next run unless you force a rebuild.
 

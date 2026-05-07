@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 from pipeline.artifacts import atomic_write_rows
 from utils.config import load_yaml
 from utils.db import Database
+from utils.progress import ProgressReporter
 from utils.ua_normalizer import ua_hash
 
 
@@ -156,7 +157,12 @@ class DeviceAtlasMapper:
         return normalized
 
 
-def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str | Path) -> Path:
+def enrich_with_deviceatlas(
+    cfg: Dict[str, Any],
+    db: Database,
+    cleaned_path: str | Path,
+    progress: ProgressReporter | None = None,
+) -> Path:
     mapper = DeviceAtlasMapper(cfg, db)
     classifier = IotCandidateClassifier(load_yaml("config/iot_device_types.yaml"))
     rows = _read_dicts(cleaned_path)
@@ -166,9 +172,12 @@ def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str
     output_path = out_dir / f"{Path(cleaned_path).stem}.deviceatlas.csv"
 
     enriched: List[Dict[str, Any]] = []
+    if progress:
+        progress.info("deviceatlas", f"mapping {len(rows)} UA groups with {workers} workers")
+        progress.update("deviceatlas", 0, len(rows), force=True)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(mapper.map_user_agent, row["user_agent"]): row for row in rows}
-        for future in as_completed(future_map):
+        for completed, future in enumerate(as_completed(future_map), start=1):
             row = future_map[future]
             props = future.result()
             hardware = str(props.get("primaryHardwareType", "") or "")
@@ -191,6 +200,8 @@ def enrich_with_deviceatlas(cfg: Dict[str, Any], db: Database, cleaned_path: str
                 }
             )
             enriched.append(row)
+            if progress:
+                progress.update("deviceatlas", completed, len(rows))
 
     enriched.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
     fieldnames = [
