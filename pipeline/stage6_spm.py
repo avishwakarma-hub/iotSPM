@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -40,17 +42,38 @@ class SpmAnalyzer:
             return cached["detection_status"], json.loads(cached["matches_json"])
 
         url = f"{self.cfg['url'].rstrip('/')}/api/tools/coverage/spm-analyze-file/"
-        response = requests.post(
-            url,
-            json={"user_agent": "custom", "url": "https://example.com", "custom_useragent": user_agent},
-            headers={
-                "accept": "application/json",
-                "Authorization": f"Api-Key {self.cfg['api_key']}",
-                "Content-Type": "application/json",
-            },
-            timeout=int(self.cfg.get("request_timeout_seconds", 45)),
-        )
-        response.raise_for_status()
+        attempts = max(1, int(self.cfg.get("request_retries", 3)) + 1)
+        retry_statuses = {int(code) for code in self.cfg.get("retry_status_codes", [429, 500, 502, 503, 504])}
+        backoff_seconds = float(self.cfg.get("retry_backoff_seconds", 5))
+        response = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.post(
+                    url,
+                    json={"user_agent": "custom", "url": "https://example.com", "custom_useragent": user_agent},
+                    headers={
+                        "accept": "application/json",
+                        "Authorization": f"Api-Key {self.cfg['api_key']}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=int(self.cfg.get("request_timeout_seconds", 45)),
+                )
+                response.raise_for_status()
+                break
+            except requests.HTTPError:
+                if response is not None and response.status_code not in retry_statuses:
+                    raise
+                if attempt >= attempts:
+                    raise
+                sleep_for = backoff_seconds * attempt
+                time.sleep(sleep_for)
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt >= attempts:
+                    raise
+                sleep_for = backoff_seconds * attempt
+                time.sleep(sleep_for)
+        if response is None:
+            raise RuntimeError("SPM request did not return a response")
         matches = response.json().get("data", {}).get("matches", [])
         status = classify_matches(matches)
         self.db.cache_spm(digest, user_agent, status, matches)
@@ -97,30 +120,61 @@ def run_spm_check(
     out_dir = Path(cfg["paths"]["reports_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"{Path(enriched_path).stem}.spm.csv"
-
-    output_rows: List[Dict[str, Any]] = []
-    if progress:
-        progress.info("spm", f"checking {len(rows)} IoT candidate UA groups with {workers} workers")
-        progress.update("spm", 0, len(rows), force=True)
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {executor.submit(analyzer.analyze, row["user_agent"]): row for row in rows}
-        for completed, future in enumerate(as_completed(future_map), start=1):
-            row = future_map[future]
-            status, matches = future.result()
-            row["spm_detection_status"] = status
-            row["spm_match_count"] = len(matches)
-            row["spm_matches_json"] = json.dumps(matches, ensure_ascii=False)
-            output_rows.append(row)
-            if progress:
-                progress.update("spm", completed, len(rows), status)
-
-    output_rows.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
+    partial_path = output_path.with_suffix(output_path.suffix + ".partial")
     fieldnames = [
         "total_group_hits", "hit_count", "group_size", "hardware_type", "device_vendor", "device_model",
         "marketing_name", "iot_candidate_reason", "spm_detection_status", "spm_match_count", "user_agent", "spm_matches_json",
     ]
+    continue_on_error = bool(cfg.get("spm", {}).get("continue_on_error", True))
+
+    output_rows: List[Dict[str, Any]] = _read_partial_rows(partial_path)
+    completed_uas = {row.get("user_agent", "") for row in output_rows if row.get("spm_detection_status")}
+    pending_rows = [row for row in rows if row.get("user_agent", "") not in completed_uas]
+    if progress:
+        resume_note = f"; resuming {len(output_rows)} completed" if output_rows else ""
+        progress.info("spm", f"checking {len(rows)} IoT candidate UA groups with {workers} workers{resume_note}")
+        progress.update("spm", len(output_rows), len(rows), force=True)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(analyzer.analyze, row["user_agent"]): row for row in pending_rows}
+        for completed, future in enumerate(as_completed(future_map), start=len(output_rows) + 1):
+            row = future_map[future]
+            try:
+                status, matches = future.result()
+            except Exception as exc:
+                if not continue_on_error:
+                    raise
+                status = "spm-error"
+                matches = [{"error": str(exc), "error_type": exc.__class__.__name__}]
+            row["spm_detection_status"] = status
+            row["spm_match_count"] = len(matches)
+            row["spm_matches_json"] = json.dumps(matches, ensure_ascii=False)
+            output_rows.append(row)
+            _append_partial_row(partial_path, row, fieldnames)
+            if progress:
+                progress.update("spm", completed, len(rows), status)
+
+    output_rows.sort(key=lambda item: int(item.get("total_group_hits") or 0), reverse=True)
     atomic_write_rows(output_path, output_rows, fieldnames)
+    partial_path.unlink(missing_ok=True)
     return output_path
+
+
+def _read_partial_rows(partial_path: Path) -> List[Dict[str, Any]]:
+    if not partial_path.is_file():
+        return []
+    return _read_dicts(partial_path)
+
+
+def _append_partial_row(partial_path: Path, row: Dict[str, Any], fieldnames: List[str]) -> None:
+    partial_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not partial_path.exists() or partial_path.stat().st_size == 0
+    with partial_path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _read_dicts(path: str | Path) -> List[Dict[str, Any]]:

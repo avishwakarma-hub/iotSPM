@@ -278,6 +278,12 @@ python run.py process <run_id> --from-stage spm --verbose
 The processor is resumable. Each stage records its artifact path in SQLite and
 will reuse that file on the next run unless you force a rebuild.
 
+SPM/Z-Intel checks are also resilient inside the stage: transient `429/5xx`
+responses are retried per User-Agent, completed rows are streamed to a
+`.partial` CSV next to the SPM report, and a later `--from-stage spm` run resumes
+from that partial file. If only a few UAs still fail after retries, they are
+included as `spm-error` rows so the high-volume review report can still be built.
+
 ```bash
 # Rebuild SPM, report, and upload only; reuse raw/csv/cleaned/DeviceAtlas files
 python run.py process <run_id> --from-stage spm

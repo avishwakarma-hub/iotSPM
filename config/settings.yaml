@@ -112,6 +112,12 @@ spm:
   api_key: replace_me
   workers: 10
   request_timeout_seconds: 45
+  request_retries: 3
+  retry_backoff_seconds: 5
+  retry_status_codes: [429, 500, 502, 503, 504]
+  # Keep the review report moving when only a few UAs fail after retries.
+  # Failed rows are marked spm-error with the error JSON for manual retry/review.
+  continue_on_error: true
 
 cleanup:
   delete_raw_current_after_convert: true

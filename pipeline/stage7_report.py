@@ -28,7 +28,7 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
 
     for idx, row in enumerate(rows, start=1):
         status = row.get("spm_detection_status", "")
-        action = "review-add-signature" if status in {"not-present", "detected-disabled"} else "already-covered"
+        action = _suggest_action(status)
         ws.append([
             idx,
             _to_int(row.get("total_group_hits")),
@@ -48,6 +48,14 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
         ws.column_dimensions[col[0].column_letter].width = max_len
     wb.save(output_path)
     return output_path
+
+
+def _suggest_action(status: str) -> str:
+    if status in {"not-present", "detected-disabled"}:
+        return "review-add-signature"
+    if status == "spm-error":
+        return "retry-spm/manual-check"
+    return "already-covered"
 
 
 def _signature_seed(ua: str) -> str:
