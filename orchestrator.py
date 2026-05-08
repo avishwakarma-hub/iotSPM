@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import csv
+from collections import Counter, defaultdict
+from html import escape
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pipeline.artifacts import path_exists, should_reuse_artifact
 from pipeline.stage1_rundeck import RundeckClient, day_window
@@ -149,7 +152,8 @@ class PipelineOrchestrator:
             self._stage_upload(run_id, report_path, run, force="upload" in force_set)
             self.db.update_run(run_id, status="completed", state="COMPLETED", last_stage="completed", report_dir=str(report_path.parent))
             self.progress.done("pipeline", f"report={report_path}")
-            self.notifier.send("iotSPM pipeline completed", self._completion_body(run_id, report_path))
+            text_body, html_body = self._completion_email(run_id, report_path)
+            self.notifier.send("iotSPM pipeline completed", text_body, html_body=html_body)
             return report_path
         except Exception as exc:
             self.db.update_run(run_id, status="failed", state="FAILED", error_message=str(exc))
@@ -286,15 +290,32 @@ class PipelineOrchestrator:
     def _should_stop(stop_after: Optional[str], current_stage: str) -> bool:
         return stop_after == current_stage
 
-    def _completion_body(self, run_id: int, report_path: Path) -> str:
+    def _completion_email(self, run_id: int, report_path: Path) -> Tuple[str, str]:
         run = self._run(run_id)
-        lines = [
+        summary = self._spm_summary(run["spm_path"])
+
+        text_lines = [
             f"Run {run_id} completed successfully.",
+            f"Date/query: {run['run_date']} / {run['query_name']}",
+            f"IoT candidate devices: {summary['total_devices']} UA groups ({summary['total_hits']} hits)",
+            f"Already detected: {summary['detected_devices']} UA groups ({summary['detected_hits']} hits)",
+            f"Not present: {summary['not_present_devices']} UA groups ({summary['not_present_hits']} hits)",
+            f"Disabled: {summary['disabled_devices']} UA groups ({summary['disabled_hits']} hits)",
+            f"SPM errors: {summary['error_devices']} UA groups ({summary['error_hits']} hits)",
             f"Review report: {report_path}",
         ]
         if run["uploaded_report_link"]:
-            lines.append(f"Google Drive link: {run['uploaded_report_link']}")
-        lines.extend(
+            text_lines.append(f"Google Drive link: {run['uploaded_report_link']}")
+        text_lines.extend(["", "Top not-present devices by hits:"])
+        if summary["top_not_present"]:
+            for item in summary["top_not_present"]:
+                text_lines.append(
+                    f"- {item['device']}: {item['hits']} hits, {item['groups']} UA groups, "
+                    f"hardware={item['hardware_type'] or 'unknown'}"
+                )
+        else:
+            text_lines.append("- None")
+        text_lines.extend(
             [
                 "",
                 "Restart examples:",
@@ -302,7 +323,202 @@ class PipelineOrchestrator:
                 f"python run.py process {run_id} --force-stage report",
             ]
         )
-        return "\n".join(lines)
+
+        html_body = self._completion_html(run_id, run, report_path, summary)
+        return "\n".join(text_lines), html_body
+
+    def _spm_summary(self, spm_path: str | Path | None) -> Dict[str, Any]:
+        rows: List[Dict[str, Any]] = []
+        if spm_path and Path(spm_path).is_file():
+            with Path(spm_path).open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        status_counts: Counter[str] = Counter()
+        status_hits: defaultdict[str, int] = defaultdict(int)
+        not_present: Dict[str, Dict[str, Any]] = {}
+        total_hits = 0
+
+        for row in rows:
+            status = row.get("spm_detection_status") or "unknown"
+            hits = self._to_int(row.get("total_group_hits") or row.get("hit_count"))
+            total_hits += hits
+            status_counts[status] += 1
+            status_hits[status] += hits
+            if status == "not-present":
+                device = self._device_label(row)
+                entry = not_present.setdefault(
+                    device,
+                    {
+                        "device": device,
+                        "hits": 0,
+                        "groups": 0,
+                        "hardware_type": row.get("hardware_type", ""),
+                        "vendor": row.get("device_vendor", ""),
+                        "model": row.get("device_model", ""),
+                        "marketing_name": row.get("marketing_name", ""),
+                        "sample_ua": row.get("user_agent", ""),
+                    },
+                )
+                entry["hits"] += hits
+                entry["groups"] += 1
+                if hits > self._to_int(entry.get("sample_hits")):
+                    entry["sample_hits"] = hits
+                    entry["sample_ua"] = row.get("user_agent", "")
+
+        detected_statuses = {"detected-released", "detected-reviewed"}
+        disabled_statuses = {"detected-disabled"}
+        error_statuses = {"spm-error"}
+        not_present_items = sorted(not_present.values(), key=lambda item: int(item.get("hits") or 0), reverse=True)
+        return {
+            "total_devices": len(rows),
+            "total_hits": total_hits,
+            "detected_devices": sum(status_counts[status] for status in detected_statuses),
+            "detected_hits": sum(status_hits[status] for status in detected_statuses),
+            "not_present_devices": status_counts["not-present"],
+            "not_present_hits": status_hits["not-present"],
+            "disabled_devices": sum(status_counts[status] for status in disabled_statuses),
+            "disabled_hits": sum(status_hits[status] for status in disabled_statuses),
+            "error_devices": sum(status_counts[status] for status in error_statuses),
+            "error_hits": sum(status_hits[status] for status in error_statuses),
+            "status_counts": dict(status_counts),
+            "status_hits": dict(status_hits),
+            "top_not_present": not_present_items[:25],
+            "all_not_present_count": len(not_present_items),
+        }
+
+    def _completion_html(self, run_id: int, run: Any, report_path: Path, summary: Dict[str, Any]) -> str:
+        total_devices = int(summary["total_devices"] or 0)
+        total_hits = int(summary["total_hits"] or 0)
+        detected_pct = self._pct(summary["detected_devices"], total_devices)
+        not_present_pct = self._pct(summary["not_present_devices"], total_devices)
+        top_rows = "".join(self._not_present_html_row(item) for item in summary["top_not_present"])
+        if not top_rows:
+            top_rows = '<tr><td colspan="5" style="padding:14px;color:#667085;text-align:center;">No not-present IoT devices found 🎉</td></tr>'
+
+        drive_link = ""
+        if run["uploaded_report_link"]:
+            drive_link = (
+                f'<a href="{escape(str(run["uploaded_report_link"]))}" '
+                'style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;'
+                'padding:10px 14px;border-radius:8px;font-weight:600;margin-right:8px;">Open Google Drive Report</a>'
+            )
+        report_path_text = escape(str(report_path))
+        spm_path_text = escape(str(run["spm_path"] or ""))
+
+        return f"""
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f4f7fb;font-family:Arial,Helvetica,sans-serif;color:#1f2937;">
+    <div style="max-width:980px;margin:0 auto;padding:24px;">
+      <div style="background:linear-gradient(135deg,#0f766e,#2563eb);border-radius:16px 16px 0 0;padding:28px;color:#ffffff;">
+        <div style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;opacity:.85;">iotSPM Pipeline Completed</div>
+        <h1 style="margin:8px 0 0;font-size:28px;line-height:1.25;">Run #{run_id} finished successfully</h1>
+        <p style="margin:8px 0 0;opacity:.92;">{escape(str(run['run_date']))} · {escape(str(run['query_name']))}</p>
+      </div>
+
+      <div style="background:#ffffff;border:1px solid #e5e7eb;border-top:0;border-radius:0 0 16px 16px;padding:24px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-bottom:22px;">
+          <tr>
+            {self._metric_card('IoT devices found', summary['total_devices'], f'{total_hits} hits', '#0f766e')}
+            {self._metric_card('Already detected', summary['detected_devices'], f'{summary["detected_hits"]} hits · {detected_pct}', '#16a34a')}
+            {self._metric_card('Not present', summary['not_present_devices'], f'{summary["not_present_hits"]} hits · {not_present_pct}', '#dc2626')}
+            {self._metric_card('SPM errors', summary['error_devices'], f'{summary["error_hits"]} hits', '#ea580c')}
+          </tr>
+        </table>
+
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:22px;">
+          <h2 style="font-size:18px;margin:0 0 10px;color:#111827;">Coverage summary</h2>
+          <div style="height:14px;background:#e5e7eb;border-radius:999px;overflow:hidden;margin-bottom:10px;">
+            <div style="height:14px;width:{detected_pct};background:#22c55e;float:left;"></div>
+            <div style="height:14px;width:{not_present_pct};background:#ef4444;float:left;"></div>
+          </div>
+          <p style="margin:0;color:#475569;font-size:14px;">Green = already detected/reviewed/released. Red = not-present candidates that likely need signature review.</p>
+        </div>
+
+        <h2 style="font-size:18px;margin:0 0 12px;color:#111827;">Top not-present IoT devices by Zscaler hits</h2>
+        <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin-bottom:22px;">
+          <thead>
+            <tr style="background:#f1f5f9;color:#334155;font-size:13px;text-align:left;">
+              <th style="padding:10px;border-bottom:1px solid #e5e7eb;">Device</th>
+              <th style="padding:10px;border-bottom:1px solid #e5e7eb;">Hardware</th>
+              <th style="padding:10px;border-bottom:1px solid #e5e7eb;text-align:right;">Hits</th>
+              <th style="padding:10px;border-bottom:1px solid #e5e7eb;text-align:right;">UA groups</th>
+              <th style="padding:10px;border-bottom:1px solid #e5e7eb;">Sample UA</th>
+            </tr>
+          </thead>
+          <tbody>{top_rows}</tbody>
+        </table>
+
+        <div style="margin-bottom:22px;">
+          {drive_link}
+          <span style="display:inline-block;background:#eef2ff;color:#3730a3;padding:10px 14px;border-radius:8px;font-weight:600;">Local report generated</span>
+        </div>
+
+        <div style="font-size:13px;color:#475569;line-height:1.55;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px;">
+          <div><strong>Review report:</strong> <code>{report_path_text}</code></div>
+          <div><strong>SPM CSV:</strong> <code>{spm_path_text}</code></div>
+          <div style="margin-top:10px;"><strong>Restart examples:</strong></div>
+          <code>python run.py process {run_id} --from-stage spm</code><br>
+          <code>python run.py process {run_id} --force-stage report</code>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+    @staticmethod
+    def _metric_card(title: str, value: Any, subtitle: str, color: str) -> str:
+        return (
+            '<td style="width:25%;padding:6px;vertical-align:top;">'
+            '<div style="border:1px solid #e5e7eb;border-radius:12px;padding:14px;background:#ffffff;">'
+            f'<div style="font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.04em;">{escape(title)}</div>'
+            f'<div style="font-size:28px;font-weight:700;color:{color};margin-top:6px;">{escape(str(value))}</div>'
+            f'<div style="font-size:13px;color:#475569;margin-top:4px;">{escape(subtitle)}</div>'
+            '</div>'
+            '</td>'
+        )
+
+    @staticmethod
+    def _not_present_html_row(item: Dict[str, Any]) -> str:
+        sample_ua = str(item.get("sample_ua") or "")
+        if len(sample_ua) > 180:
+            sample_ua = sample_ua[:177] + "..."
+        return (
+            '<tr style="font-size:13px;color:#1f2937;">'
+            f'<td style="padding:10px;border-bottom:1px solid #f1f5f9;font-weight:600;">{escape(str(item.get("device") or "Unknown"))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #f1f5f9;color:#475569;">{escape(str(item.get("hardware_type") or "unknown"))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #f1f5f9;text-align:right;font-weight:700;color:#dc2626;">{escape(str(item.get("hits") or 0))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #f1f5f9;text-align:right;">{escape(str(item.get("groups") or 0))}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:Consolas,Monaco,monospace;">{escape(sample_ua)}</td>'
+            '</tr>'
+        )
+
+    @staticmethod
+    def _device_label(row: Dict[str, Any]) -> str:
+        vendor = str(row.get("device_vendor") or "").strip()
+        model = str(row.get("device_model") or "").strip()
+        marketing = str(row.get("marketing_name") or "").strip()
+        hardware = str(row.get("hardware_type") or "").strip()
+        parts = [part for part in [vendor, model] if part]
+        label = " ".join(parts) or marketing or hardware or "Unknown device"
+        if marketing and marketing.lower() not in label.lower():
+            label = f"{label} ({marketing})"
+        return label
+
+    @staticmethod
+    def _pct(value: Any, total: Any) -> str:
+        total_int = PipelineOrchestrator._to_int(total)
+        if total_int <= 0:
+            return "0%"
+        return f"{(PipelineOrchestrator._to_int(value) / total_int) * 100:.1f}%"
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(float(value or 0))
+        except Exception:
+            return 0
 
     def _failure_body(self, run_id: int, exc: Exception) -> str:
         run = self._run(run_id)

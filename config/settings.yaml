@@ -74,13 +74,16 @@ zclient:
 
 google_drive:
   scopes:
+    # Same OAuth token is used for both operations:
+    # - drive.readonly downloads Rundeck-generated report files by id.
+    # - drive.file uploads final iotSPM XLSX reports created by this app.
+    # Re-run `python run.py auth-drive` if changing scopes on an existing token.
     - https://www.googleapis.com/auth/drive.readonly
+    - https://www.googleapis.com/auth/drive.file
 
 report_upload:
-  enabled: false
-  # Optional. Requires a write-capable Google Drive scope such as:
-  # google_drive.scopes:
-  #   - https://www.googleapis.com/auth/drive.file
+  enabled: true
+  # Optional Google Drive folder id where final XLSX reports should be uploaded.
   folder_id: ""
   filename: ""
 

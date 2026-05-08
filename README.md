@@ -14,6 +14,7 @@ The pipeline turns large Zscaler UA log exports into a small, prioritized review
 6. Drop obvious mobile phone/desktop/tablet traffic.
 7. Check SPM/Z-Intel IoT signature coverage.
 8. Produce an Excel review file sorted by hit volume so high-impact devices are reviewed first.
+9. Upload the final Excel report to Google Drive and include the link in the completion email.
 
 ## Repository layout
 
@@ -332,15 +333,21 @@ python run.py run-local /path/to/report.csv --day 2026-01-01
 python run.py run-local /path/to/report.csv --day 2026-01-01 --stop-after filter
 ```
 
-### Optional upload of the final Excel report
+### Google Drive upload of the final Excel report
 
-By default final XLSX reports are stored locally under `data/reports/`. To also
-upload them to Google Drive, enable this in `config/settings.local.yaml` and use
-a write-capable Drive scope:
+Final XLSX reports are stored locally under `data/reports/` and, by default,
+uploaded to Google Drive before the completion email is sent. The email includes
+the uploaded report link when upload succeeds.
+
+The same OAuth client/token used for Rundeck report download is reused for final
+report upload. Keep `drive.readonly` for downloading Rundeck-generated report
+files by id, and add `drive.file` for uploading final reports created by this
+pipeline:
 
 ```yaml
 google_drive:
   scopes:
+    - https://www.googleapis.com/auth/drive.readonly
     - https://www.googleapis.com/auth/drive.file
 
 report_upload:
@@ -348,10 +355,19 @@ report_upload:
   folder_id: <optional-drive-folder-id>
 ```
 
-Then re-run OAuth once because the token scope changed:
+If you previously authenticated with `drive.readonly`, re-run OAuth once because
+the token scope changed:
 
 ```bash
 python run.py auth-drive
+```
+
+If upload is not desired in a particular environment, disable it in
+`config/settings.local.yaml`:
+
+```yaml
+report_upload:
+  enabled: false
 ```
 
 ### Show latest runs

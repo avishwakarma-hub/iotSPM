@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
-from typing import Any, Dict, Iterable
+from typing import Any, Dict
 
 
 class Notifier:
@@ -11,7 +11,7 @@ class Notifier:
         self.cfg = cfg.get("smtp", {})
         self.logger = logger or logging.getLogger(__name__)
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str, html_body: str | None = None) -> None:
         if not self.cfg.get("enabled", False):
             self.logger.info("Email disabled; notification skipped: %s", subject)
             return
@@ -37,6 +37,8 @@ class Notifier:
         msg["From"] = self.cfg.get("alert_email_from") or self.cfg.get("username") or "iotspm@localhost"
         msg["To"] = ", ".join(recipients)
         msg.set_content(body)
+        if html_body:
+            msg.add_alternative(html_body, subtype="html")
 
         try:
             with smtplib.SMTP(host, int(self.cfg.get("port", 587)), timeout=30) as smtp:

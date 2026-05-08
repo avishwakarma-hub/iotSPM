@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +21,12 @@ def _manual_oauth(flow: InstalledAppFlow) -> Credentials:
     let the operator open it manually, then accept either the returned ``code``
     value or the full redirected localhost URL containing ``?code=...``.
     """
+
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Google Drive OAuth is required, but this process is non-interactive. "
+            "Run `python run.py auth-drive` manually once, then retry the pipeline."
+        )
 
     flow.redirect_uri = "http://localhost:8080/"
     auth_url, _ = flow.authorization_url(
@@ -68,6 +75,9 @@ def get_drive_service(cfg: Dict[str, Any]):
     creds = None
     if token_file.exists():
         creds = Credentials.from_authorized_user_file(str(token_file), scopes)
+        if not creds.has_scopes(scopes):
+            token_file.unlink()
+            creds = None
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
