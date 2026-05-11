@@ -19,7 +19,8 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
     ws.title = "IoT UA Review"
     headers = [
         "Priority", "Hits", "Group Size", "Hardware Type", "Vendor", "Model", "Marketing Name",
-        "Candidate Reason", "SPM Status", "Action", "Suggested Signature Seed", "User-Agent",
+        "Candidate Reason", "SPM Status", "KB Match", "KB Device Type", "KB Pattern", "KB Family",
+        "KB Family Size", "Consolidation Note", "Action", "Suggested Signature Seed", "User-Agent",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -28,7 +29,7 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
 
     for idx, row in enumerate(rows, start=1):
         status = row.get("spm_detection_status", "")
-        action = _suggest_action(status)
+        action = _suggest_action(status, row)
         ws.append([
             idx,
             _to_int(row.get("total_group_hits")),
@@ -39,6 +40,12 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
             row.get("marketing_name", ""),
             row.get("iot_candidate_reason", ""),
             status,
+            row.get("kb_match", ""),
+            row.get("kb_device_type", ""),
+            row.get("kb_pattern", ""),
+            row.get("kb_family", ""),
+            _to_int(row.get("kb_family_size")),
+            _consolidation_note(row),
             action,
             _signature_seed(row.get("user_agent", "")),
             row.get("user_agent", ""),
@@ -50,7 +57,10 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
     return output_path
 
 
-def _suggest_action(status: str) -> str:
+def _suggest_action(status: str, row: Dict[str, Any] | None = None) -> str:
+    row = row or {}
+    if row.get("kb_match") == "yes" and status == "not-present":
+        return "review-existing-kb-match"
     if status in {"not-present", "detected-disabled"}:
         return "review-add-signature"
     if status == "spm-error":
@@ -61,6 +71,21 @@ def _suggest_action(status: str) -> str:
 def _signature_seed(ua: str) -> str:
     # Conservative seed: exact UA first. Reviewer can generalize safely.
     return ua
+
+
+def _consolidation_note(row: Dict[str, Any]) -> str:
+    if row.get("kb_match") != "yes":
+        return ""
+    family = str(row.get("kb_family") or "").strip()
+    family_size = _to_int(row.get("kb_family_size"))
+    pattern = str(row.get("kb_pattern") or "").strip()
+    device_type = str(row.get("kb_device_type") or "").strip()
+    if family and family_size > 1:
+        return (
+            f"Fits existing {device_type} family '{family}' with {family_size} SPM patterns; "
+            "review whether to consolidate/broaden the family instead of adding a narrow one-off signature."
+        )
+    return f"Matches existing SPM pattern '{pattern}' ({device_type}); verify why live SPM status differs if marked not-present."
 
 
 def _read_dicts(path: str | Path) -> List[Dict[str, Any]]:

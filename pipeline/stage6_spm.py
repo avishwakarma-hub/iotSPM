@@ -13,6 +13,7 @@ import requests
 from pipeline.artifacts import atomic_write_rows
 from utils.db import Database
 from utils.progress import ProgressReporter
+from utils.spm_kb import SpmKnowledgeBase, load_knowledge_base
 from utils.ua_normalizer import ua_hash
 
 
@@ -33,13 +34,16 @@ IOT_TICKETS = {
 class SpmAnalyzer:
     def __init__(self, cfg: Dict[str, Any], db: Database):
         self.cfg = cfg.get("spm", {})
+        self.full_cfg = cfg
         self.db = db
+        self.kb = self._load_kb()
 
-    def analyze(self, user_agent: str) -> Tuple[str, List[Dict[str, Any]]]:
+    def analyze(self, user_agent: str) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+        kb_match = self._kb_match(user_agent)
         digest = ua_hash(user_agent)
         cached = self.db.cache_get("spm_cache", digest)
         if cached:
-            return cached["detection_status"], json.loads(cached["matches_json"])
+            return cached["detection_status"], json.loads(cached["matches_json"]), kb_match
 
         url = f"{self.cfg['url'].rstrip('/')}/api/tools/coverage/spm-analyze-file/"
         attempts = max(1, int(self.cfg.get("request_retries", 3)) + 1)
@@ -77,7 +81,24 @@ class SpmAnalyzer:
         matches = response.json().get("data", {}).get("matches", [])
         status = classify_matches(matches)
         self.db.cache_spm(digest, user_agent, status, matches)
-        return status, matches
+        return status, matches, kb_match
+
+    def _load_kb(self) -> SpmKnowledgeBase | None:
+        export_cfg = self.full_cfg.get("spm_export", {})
+        if not export_cfg.get("enabled", True) or not export_cfg.get("use_in_stage6", True):
+            return None
+        kb_path = export_cfg.get("kb_cache_path")
+        if not kb_path:
+            kb_path = Path(self.full_cfg.get("base_dir", ".")) / "data" / "spm_knowledge_base.json"
+        return load_knowledge_base(kb_path)
+
+    def _kb_match(self, user_agent: str) -> Dict[str, Any]:
+        if not self.kb:
+            return {"matched": False}
+        match = self.kb.match(user_agent)
+        if not match:
+            return {"matched": False, "export_id": self.kb.data.get("export_id", "")}
+        return match
 
 
 def classify_matches(matches: List[Dict[str, Any]]) -> str:
@@ -123,7 +144,9 @@ def run_spm_check(
     partial_path = output_path.with_suffix(output_path.suffix + ".partial")
     fieldnames = [
         "total_group_hits", "hit_count", "group_size", "hardware_type", "device_vendor", "device_model",
-        "marketing_name", "iot_candidate_reason", "spm_detection_status", "spm_match_count", "user_agent", "spm_matches_json",
+        "marketing_name", "iot_candidate_reason", "spm_detection_status", "spm_match_count",
+        "kb_match", "kb_refid", "kb_device_type", "kb_pattern", "kb_family", "kb_family_size", "kb_export_id",
+        "user_agent", "spm_matches_json",
     ]
     continue_on_error = bool(cfg.get("spm", {}).get("continue_on_error", True))
 
@@ -139,14 +162,16 @@ def run_spm_check(
         for completed, future in enumerate(as_completed(future_map), start=len(output_rows) + 1):
             row = future_map[future]
             try:
-                status, matches = future.result()
+                status, matches, kb_match = future.result()
             except Exception as exc:
                 if not continue_on_error:
                     raise
                 status = "spm-error"
                 matches = [{"error": str(exc), "error_type": exc.__class__.__name__}]
+                kb_match = {"matched": False}
             row["spm_detection_status"] = status
             row["spm_match_count"] = len(matches)
+            _apply_kb_match(row, kb_match)
             row["spm_matches_json"] = json.dumps(matches, ensure_ascii=False)
             output_rows.append(row)
             _append_partial_row(partial_path, row, fieldnames)
@@ -157,6 +182,16 @@ def run_spm_check(
     atomic_write_rows(output_path, output_rows, fieldnames)
     partial_path.unlink(missing_ok=True)
     return output_path
+
+
+def _apply_kb_match(row: Dict[str, Any], kb_match: Dict[str, Any]) -> None:
+    row["kb_match"] = "yes" if kb_match.get("matched") else "no"
+    row["kb_refid"] = kb_match.get("refid", "")
+    row["kb_device_type"] = kb_match.get("title", "")
+    row["kb_pattern"] = kb_match.get("pattern", "")
+    row["kb_family"] = kb_match.get("family", "")
+    row["kb_family_size"] = kb_match.get("family_size", "")
+    row["kb_export_id"] = kb_match.get("export_id", "")
 
 
 def _read_partial_rows(partial_path: Path) -> List[Dict[str, Any]]:

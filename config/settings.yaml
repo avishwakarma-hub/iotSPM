@@ -122,6 +122,24 @@ spm:
   # Failed rows are marked spm-error with the error JSON for manual retry/review.
   continue_on_error: true
 
+spm_export:
+  enabled: true
+  auto_sync: true
+  use_in_stage6: true
+  required: false
+  # Uses spm.url and spm.api_key by default. Override here only if export API differs.
+  api_url: ""
+  api_key: ""
+  verify_ssl: true
+  request_timeout_seconds: 60
+  # "latest" performs one lightweight API check each pipeline run and rebuilds KB
+  # only when the latest approved export id changes.
+  export_id: latest
+  zip_password_prefix: export_
+  spm_filename: phrases_req_uri.spm
+  exports_dir: /mnt/ext_storage/iotSPM/data/spm_exports
+  kb_cache_path: /mnt/ext_storage/iotSPM/data/spm_knowledge_base.json
+
 cleanup:
   delete_raw_current_after_convert: true
   delete_csv_after_filter: true

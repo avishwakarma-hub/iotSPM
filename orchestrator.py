@@ -15,6 +15,7 @@ from pipeline.stage5_deviceatlas import enrich_with_deviceatlas
 from pipeline.stage6_spm import run_spm_check
 from pipeline.stage7_report import build_review_report
 from pipeline.stage8_upload import upload_report_if_enabled
+from tools.spm_export_fetcher import ensure_spm_knowledge_base
 from utils.db import Database
 from utils.notifier import Notifier
 from utils.progress import ProgressReporter, progress_from_config
@@ -138,6 +139,8 @@ class PipelineOrchestrator:
             if self._should_stop(stop_after, "deviceatlas"):
                 return enriched_path
 
+            self._sync_spm_kb(force="spm" in force_set)
+
             run = self._run(run_id)
             spm_path = self._stage_spm(run_id, enriched_path, run, force="spm" in force_set)
             if self._should_stop(stop_after, "spm"):
@@ -232,6 +235,20 @@ class PipelineOrchestrator:
         self.db.update_run(run_id, enriched_path=str(enriched_path), state=STAGE_STATE["deviceatlas"], last_stage="deviceatlas")
         self.progress.done("deviceatlas", str(enriched_path))
         return enriched_path
+
+    def _sync_spm_kb(self, *, force: bool = False) -> None:
+        export_cfg = self.cfg.get("spm_export", {})
+        if not export_cfg.get("enabled", True) or not export_cfg.get("auto_sync", True):
+            return
+        self.progress.stage("spm-kb", "check latest approved SPM export and update local KB only if export_id changed")
+        try:
+            kb_path = ensure_spm_knowledge_base(self.cfg, force=force, logger=self.logger)
+            self.progress.done("spm-kb", str(kb_path) if kb_path else "not available")
+        except Exception as exc:
+            if export_cfg.get("required", False):
+                raise
+            self.logger.warning("SPM KB sync failed; continuing without local KB pre-check: %s", exc)
+            self.progress.done("spm-kb", f"sync failed; continuing without KB: {exc}")
 
     def _stage_spm(self, run_id: int, enriched_path: Path, run, *, force: bool) -> Path:
         self.progress.stage("spm", "reuse existing artifact" if should_reuse_artifact(run["spm_path"], force=force) else "check Z-Intel/SPM coverage")

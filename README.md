@@ -12,9 +12,10 @@ The pipeline turns large Zscaler UA log exports into a small, prioritized review
 4. Clean junk/non-IoT UAs and deduplicate version/build variants.
 5. Enrich remaining UAs with DeviceAtlas device properties.
 6. Drop obvious mobile phone/desktop/tablet traffic.
-7. Check SPM/Z-Intel IoT signature coverage.
-8. Produce an Excel review file sorted by hit volume so high-impact devices are reviewed first.
-9. Upload the final Excel report to Google Drive and include the link in the completion email.
+7. Sync the latest approved SPM export into a local IoT signature knowledge base.
+8. Check SPM/Z-Intel IoT signature coverage and annotate local KB/family matches.
+9. Produce an Excel review file sorted by hit volume so high-impact devices are reviewed first.
+10. Upload the final Excel report to Google Drive and include the link in the completion email.
 
 ## Repository layout
 
@@ -32,8 +33,11 @@ pipeline/
   stage5_deviceatlas.py    # DeviceAtlas enrichment/cache
   stage6_spm.py            # SPM/Z-Intel coverage check/cache
   stage7_report.py         # XLSX review report
+tools/
+  spm_export_fetcher.py    # fetch latest approved SPM export and build local KB
+  sig_family_report.py     # inspect grouped SPM UA signature families
 utils/
-  config.py, db.py, google_auth.py, logger.py, notifier.py, ua_normalizer.py
+  config.py, db.py, google_auth.py, logger.py, notifier.py, spm_kb.py, ua_normalizer.py
 orchestrator.py            # stateful pipeline orchestration
 run.py                     # CLI entry point
 ```
@@ -122,6 +126,14 @@ rundeck:
 
 spm:
   api_key: <zintel-api-key>
+
+spm_export:
+  enabled: true
+  auto_sync: true
+  export_id: latest
+  # optional if different from spm.url/spm.api_key:
+  # api_url: https://z-intel-plus.corp.zscaler.com/
+  # api_key: <zintel-api-key>
 
 smtp:
   enabled: true
@@ -285,6 +297,12 @@ responses are retried per User-Agent, completed rows are streamed to a
 from that partial file. If only a few UAs still fail after retries, they are
 included as `spm-error` rows so the high-volume review report can still be built.
 
+Before Stage 6, the orchestrator runs a lightweight SPM export sync. With
+`spm_export.export_id: latest`, it checks the latest approved export id and only
+downloads/rebuilds the local KB when that id changes. If sync fails and
+`spm_export.required: false`, the pipeline logs a warning and continues with the
+live SPM API check.
+
 ```bash
 # Rebuild SPM, report, and upload only; reuse raw/csv/cleaned/DeviceAtlas files
 python run.py process <run_id> --from-stage spm
@@ -298,6 +316,47 @@ python run.py process <run_id> --from-stage convert
 # Debug/review an intermediate artifact and stop
 python run.py process <run_id> --stop-after deviceatlas
 ```
+
+### SPM export KB and signature-family analysis
+
+The local SPM KB is built from `phrases_req_uri.spm` inside an approved SPM
+export. It keeps IoT UA patterns, groups related model patterns into families
+using model-aware prefixes such as `mc9`, `pico`, `vr`, etc., and lets Stage 6
+annotate candidate UAs before/alongside the live SPM API result.
+
+Manual commands:
+
+```bash
+# Fetch latest approved export and rebuild KB only if export_id changed
+python tools/spm_export_fetcher.py
+
+# Force rebuild from latest approved export
+python tools/spm_export_fetcher.py --force
+
+# Build KB from an already extracted phrases_req_uri.spm file
+python tools/spm_export_fetcher.py --local-file /path/to/phrases_req_uri.spm --export-id manual-2026-05
+
+# Show largest grouped signature families
+python tools/sig_family_report.py --limit 50
+
+# Export family inventory to CSV for review
+python tools/sig_family_report.py --csv data/reports/spm_families.csv
+```
+
+The Stage 6 CSV now includes these KB columns:
+
+- `kb_match`
+- `kb_refid`
+- `kb_device_type`
+- `kb_pattern`
+- `kb_family`
+- `kb_family_size`
+- `kb_export_id`
+
+The Excel report shows KB match/family columns and a consolidation note. If a UA
+is marked `not-present` by the live SPM API but matches the local export KB, the
+action becomes `review-existing-kb-match` so you can investigate mismatched
+coverage/export freshness before adding a duplicate signature.
 
 Failure emails include the last completed stage, error message, and a suggested
 restart command. `python run.py status --limit 20` also shows `last_stage` and
@@ -386,6 +445,8 @@ data/csv/       # converted CSV
 data/cleaned/   # filtered/deduped UA groups
 data/enriched/  # DeviceAtlas enrichment
 data/reports/   # SPM CSV + XLSX review report
+data/spm_exports/ # downloaded/extracted SPM exports when enabled
+data/spm_knowledge_base.json # local IoT SPM UA pattern KB
 db/             # SQLite state/cache
 logs/           # iotspm.log
 ```
@@ -395,6 +456,7 @@ The final Excel report contains:
 - Priority order by total hits
 - Hardware type/vendor/model/marketing name
 - SPM status: `detected-released`, `detected-reviewed`, `detected-disabled`, `not-present`
+- Local SPM export KB match/family fields for duplicate/consolidation review
 - Suggested action
 - Original User-Agent
 
