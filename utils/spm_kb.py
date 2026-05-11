@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 GENERIC_PATTERNS = {
     "android",
     "applewebkit",
+    "build",
     "build/",
     "chrome",
     "cfnetwork/",
@@ -33,15 +34,32 @@ GENERIC_PATTERNS = {
 @dataclass(frozen=True)
 class SpmSignature:
     refid: str
+    signature_id: str
     dep: str
     flags: str
     scope: str
     title: str
     pattern: str
     pattern_lower: str
+    row_pattern: str = ""
+    dependency_refids: Tuple[str, ...] = ()
+    dependency_patterns: Tuple[str, ...] = ()
+    match_terms: Tuple[str, ...] = ()
+    support_terms: Tuple[str, ...] = ()
     family: Optional[str] = None
     family_size: int = 0
     family_members: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RawSpmRow:
+    refid: str
+    signature_id: str
+    dep: str
+    flags: str
+    scope: str
+    title: str
+    pattern: str
 
 
 class SpmKnowledgeBase:
@@ -50,9 +68,9 @@ class SpmKnowledgeBase:
     def __init__(self, data: Dict[str, Any]):
         self.data = data
         self.signatures: List[Dict[str, Any]] = list(data.get("signatures") or [])
-        # Prefer more-specific patterns first. This avoids a short family pattern
-        # taking precedence over a longer exact SPM pattern.
-        self.signatures.sort(key=lambda item: len(str(item.get("pattern") or "")), reverse=True)
+        # Prefer more-specific signatures first. A generic child pattern like
+        # "build/" must never beat a meaningful dependency token like "tc53".
+        self.signatures.sort(key=self._sort_key, reverse=True)
 
     @classmethod
     def load(cls, path: str | Path) -> "SpmKnowledgeBase":
@@ -61,23 +79,83 @@ class SpmKnowledgeBase:
 
     def match(self, user_agent: str) -> Optional[Dict[str, Any]]:
         ua_lower = (user_agent or "").lower()
-        if not ua_lower:
+        ua_normalized = _normalize_for_match(user_agent)
+        if not ua_lower or not ua_normalized.strip():
             return None
+        candidates: List[Tuple[Tuple[int, int, int, int, int], Dict[str, Any]]] = []
         for sig in self.signatures:
-            pattern = str(sig.get("pattern") or "")
-            if pattern and pattern.lower() in ua_lower:
-                return {
-                    "matched": True,
-                    "refid": sig.get("refid", ""),
-                    "title": sig.get("title", ""),
-                    "pattern": pattern,
-                    "family": sig.get("family") or "",
-                    "family_size": int(sig.get("family_size") or 0),
-                    "family_members": sig.get("family_members") or [],
-                    "match_type": "pattern-substring",
-                    "export_id": self.data.get("export_id", ""),
-                }
+            candidate = self._match_signature(sig, ua_lower, ua_normalized)
+            if candidate:
+                candidates.append(candidate)
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return candidates[0][1]
         return None
+
+    @staticmethod
+    def _sort_key(item: Dict[str, Any]) -> Tuple[int, int, int, int]:
+        terms = [str(term) for term in (item.get("match_terms") or []) if str(term).strip()]
+        return (
+            len(terms),
+            sum(len(term) for term in terms),
+            len(str(item.get("dependency_patterns") or [])),
+            len(str(item.get("pattern") or "")),
+        )
+
+    def _match_signature(
+        self,
+        sig: Dict[str, Any],
+        ua_lower: str,
+        ua_normalized: str,
+    ) -> Optional[Tuple[Tuple[int, int, int, int, int], Dict[str, Any]]]:
+        terms = [str(term).strip().lower() for term in (sig.get("match_terms") or []) if str(term).strip()]
+        if not terms:
+            # Backward compatibility for an older KB cache. Generic single-token
+            # patterns are intentionally ignored to avoid false matches like
+            # IoT.Device.MediaPlayer/build for every Android Build UA.
+            fallback = _normalize_pattern_for_match(str(sig.get("pattern") or ""))
+            if not fallback or _is_generic_match_term(fallback):
+                return None
+            terms = [fallback]
+
+        matched_terms = [term for term in terms if _term_in_normalized_ua(term, ua_normalized)]
+        if len(matched_terms) != len(terms):
+            return None
+
+        support_terms = [
+            str(term).strip().lower()
+            for term in (sig.get("support_terms") or [])
+            if str(term).strip()
+        ]
+        matched_support_terms = [term for term in support_terms if _term_in_normalized_ua(term, ua_normalized)]
+        exact_patterns = [str(sig.get("row_pattern") or ""), str(sig.get("pattern") or "")]
+        exact_match = any(pattern and pattern.lower() in ua_lower for pattern in exact_patterns)
+        match_type = "exact-pattern-substring" if exact_match and not sig.get("dependency_patterns") else "normalized-composite"
+        score = (
+            len(matched_terms),
+            sum(len(term) for term in matched_terms),
+            len(matched_support_terms),
+            1 if exact_match else 0,
+            len(str(sig.get("pattern") or "")),
+        )
+        return score, {
+            "matched": True,
+            "refid": sig.get("refid", ""),
+            "smstat_id": sig.get("smstat_id") or sig.get("refid", ""),
+            "signature_id": sig.get("signature_id", ""),
+            "title": sig.get("title", ""),
+            "pattern": sig.get("pattern", ""),
+            "row_pattern": sig.get("row_pattern", ""),
+            "dependency_refids": sig.get("dependency_refids") or [],
+            "dependency_patterns": sig.get("dependency_patterns") or [],
+            "match_terms": matched_terms,
+            "support_terms": matched_support_terms,
+            "family": sig.get("family") or "",
+            "family_size": int(sig.get("family_size") or 0),
+            "family_members": sig.get("family_members") or [],
+            "match_type": match_type,
+            "export_id": self.data.get("export_id", ""),
+        }
 
 
 def load_knowledge_base(path: str | Path | None) -> Optional[SpmKnowledgeBase]:
@@ -129,12 +207,19 @@ def build_knowledge_base(
         serialized_sigs.append(
             {
                 "refid": sig.refid,
+                "smstat_id": sig.refid,
+                "signature_id": sig.signature_id,
                 "dep": sig.dep,
                 "flags": sig.flags,
                 "scope": sig.scope,
                 "title": sig.title,
                 "pattern": sig.pattern,
                 "pattern_lower": sig.pattern_lower,
+                "row_pattern": sig.row_pattern,
+                "dependency_refids": list(sig.dependency_refids),
+                "dependency_patterns": list(sig.dependency_patterns),
+                "match_terms": list(sig.match_terms),
+                "support_terms": list(sig.support_terms),
                 "family": family or "",
                 "family_size": family_size,
                 "family_members": sorted(set(members)),
@@ -150,7 +235,7 @@ def build_knowledge_base(
             }
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "export_id": export_id or "local",
         "source_url": source_url,
         "spm_file": str(spm_file),
@@ -163,35 +248,127 @@ def build_knowledge_base(
 
 
 def parse_spm_file(spm_file: str | Path) -> List[SpmSignature]:
-    parsed: List[SpmSignature] = []
+    rows: Dict[str, RawSpmRow] = {}
+    row_order: List[str] = []
+    current_signature_id = ""
     with Path(spm_file).open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        reader = csv.reader(handle)
-        for parts in reader:
-            if not parts:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if stripped.startswith("## signature ="):
+                current_signature_id = stripped.split("=", 1)[1].strip()
                 continue
-            first = str(parts[0]).strip()
-            if first.startswith("#") or len(parts) < 14:
+            if not stripped or stripped.startswith("#"):
                 continue
-            refid = first
-            dep = str(parts[2]).strip() if len(parts) > 2 else ""
-            flags = str(parts[3]).strip() if len(parts) > 3 else ""
-            scope = str(parts[10]).strip() if len(parts) > 10 else ""
-            title = str(parts[12]).strip() if len(parts) > 12 else ""
-            pattern = str(parts[13]).strip() if len(parts) > 13 else ""
-            if scope != "2" or not _is_iot_title(title) or _is_generic_pattern(pattern):
+            parts = next(csv.reader([raw_line]))
+            if not parts or len(parts) < 14:
                 continue
-            parsed.append(
-                SpmSignature(
-                    refid=refid,
-                    dep=dep,
-                    flags=flags,
-                    scope=scope,
-                    title=title,
-                    pattern=pattern,
-                    pattern_lower=pattern.lower(),
-                )
+            refid = str(parts[0]).strip()
+            if not refid:
+                continue
+            row = RawSpmRow(
+                refid=refid,
+                signature_id=current_signature_id,
+                dep=str(parts[2]).strip() if len(parts) > 2 else "",
+                flags=str(parts[3]).strip() if len(parts) > 3 else "",
+                scope=str(parts[10]).strip() if len(parts) > 10 else "",
+                title=str(parts[12]).strip() if len(parts) > 12 else "",
+                pattern=str(parts[13]).strip() if len(parts) > 13 else "",
             )
+            rows[row.refid] = row
+            row_order.append(row.refid)
+
+    parsed: List[SpmSignature] = []
+    for refid in row_order:
+        row = rows[refid]
+        if row.scope != "2" or not _is_iot_title(row.title):
+            continue
+        dependency_chain = _dependency_chain(row, rows)
+        row_term = _normalize_pattern_for_match(row.pattern)
+        dependency_terms = [_normalize_pattern_for_match(dep.pattern) for dep in dependency_chain]
+        dependency_terms = [term for term in dependency_terms if term]
+        meaningful_dependency_terms = [term for term in dependency_terms if not _is_generic_match_term(term)]
+        if meaningful_dependency_terms:
+            match_terms = tuple(dict.fromkeys(meaningful_dependency_terms))
+            support_terms = tuple(dict.fromkeys(term for term in dependency_terms if _is_generic_match_term(term)))
+            pattern = _format_composite_pattern([dep.pattern for dep in dependency_chain] + [row.pattern])
+        elif row_term and not _is_generic_match_term(row_term):
+            match_terms = (row_term,)
+            support_terms = ()
+            pattern = row.pattern
+        else:
+            # Do not keep standalone generic final rows like MediaPlayer/build.
+            # They cause broad false positives and are only useful when paired
+            # with a meaningful dependency token such as tc53.
+            continue
+        dependency_refids = tuple(dep.refid for dep in dependency_chain if dep.refid != row.refid)
+        dependency_patterns = tuple(dep.pattern for dep in dependency_chain if dep.pattern)
+        parsed.append(
+            SpmSignature(
+                refid=row.refid,
+                signature_id=row.signature_id,
+                dep=row.dep,
+                flags=row.flags,
+                scope=row.scope,
+                title=row.title,
+                pattern=pattern,
+                pattern_lower=pattern.lower(),
+                row_pattern=row.pattern,
+                dependency_refids=dependency_refids,
+                dependency_patterns=dependency_patterns,
+                match_terms=match_terms,
+                support_terms=support_terms,
+            )
+        )
     return parsed
+
+
+def _dependency_chain(row: RawSpmRow, rows: Dict[str, RawSpmRow]) -> List[RawSpmRow]:
+    chain: List[RawSpmRow] = []
+    seen = {row.refid}
+    dep_id = row.dep
+    while dep_id and dep_id not in seen:
+        dep_row = rows.get(dep_id)
+        if not dep_row:
+            break
+        chain.insert(0, dep_row)
+        seen.add(dep_id)
+        dep_id = dep_row.dep
+    return chain
+
+
+def _format_composite_pattern(patterns: Iterable[str]) -> str:
+    clean = [re.sub(r"\s+", " ", str(pattern).strip()) for pattern in patterns if str(pattern).strip()]
+    return " AND ".join(dict.fromkeys(clean))
+
+
+def _normalize_for_match(value: str) -> str:
+    normalized = (value or "").lower()
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    collapsed = re.sub(r"\s+", " ", normalized).strip()
+    return f" {collapsed} " if collapsed else ""
+
+
+def _normalize_pattern_for_match(pattern: str) -> str:
+    value = (pattern or "").lower().strip()
+    value = re.sub(r"(?i)\s*build/\s*$", " build", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def _term_in_normalized_ua(term: str, ua_normalized: str) -> bool:
+    normalized_term = _normalize_pattern_for_match(term)
+    return bool(normalized_term) and f" {normalized_term} " in ua_normalized
+
+
+def _is_generic_match_term(term: str) -> bool:
+    value = _normalize_pattern_for_match(term)
+    if not value:
+        return True
+    generic_values = {_normalize_pattern_for_match(item) for item in GENERIC_PATTERNS}
+    if value in generic_values:
+        return True
+    return len(value) < 4
 
 
 def extract_family_key(pattern: str, all_patterns_for_type: Iterable[str]) -> Optional[str]:

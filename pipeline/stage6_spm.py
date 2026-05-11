@@ -149,7 +149,9 @@ def run_spm_check(
     fieldnames = [
         "total_group_hits", "hit_count", "group_size", "hardware_type", "device_vendor", "device_model",
         "marketing_name", "iot_candidate_reason", "spm_detection_status", "spm_match_count",
-        "kb_match", "kb_refid", "kb_device_type", "kb_pattern", "kb_family", "kb_family_size", "kb_export_id",
+        "kb_match", "kb_refid", "kb_smstat_id", "kb_signature_id", "kb_device_type", "kb_pattern", "kb_row_pattern",
+        "kb_dependency_refids", "kb_dependency_patterns", "kb_match_terms", "kb_match_type",
+        "kb_family", "kb_family_size", "kb_export_id",
         "user_agent", "spm_matches_json",
     ]
     continue_on_error = bool(cfg.get("spm", {}).get("continue_on_error", True))
@@ -194,11 +196,24 @@ def run_spm_check(
 def _apply_kb_match(row: Dict[str, Any], kb_match: Dict[str, Any]) -> None:
     row["kb_match"] = "yes" if kb_match.get("matched") else "no"
     row["kb_refid"] = kb_match.get("refid", "")
+    row["kb_smstat_id"] = kb_match.get("smstat_id", "")
+    row["kb_signature_id"] = kb_match.get("signature_id", "")
     row["kb_device_type"] = kb_match.get("title", "")
     row["kb_pattern"] = kb_match.get("pattern", "")
+    row["kb_row_pattern"] = kb_match.get("row_pattern", "")
+    row["kb_dependency_refids"] = _json_list(kb_match.get("dependency_refids") or [])
+    row["kb_dependency_patterns"] = _json_list(kb_match.get("dependency_patterns") or [])
+    row["kb_match_terms"] = _json_list(kb_match.get("match_terms") or [])
+    row["kb_match_type"] = kb_match.get("match_type", "")
     row["kb_family"] = kb_match.get("family", "")
     row["kb_family_size"] = kb_match.get("family_size", "")
     row["kb_export_id"] = kb_match.get("export_id", "")
+
+
+def _json_list(value: Any) -> str:
+    if not value:
+        return ""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _read_partial_rows(partial_path: Path) -> List[Dict[str, Any]]:

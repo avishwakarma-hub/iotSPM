@@ -22,8 +22,10 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
     ws.title = "IoT UA Review"
     headers = [
         "Priority", "Hits", "Group Size", "Hardware Type", "Vendor", "Model", "Marketing Name",
-        "Candidate Reason", "SPM Status", "KB Match", "KB Device Type", "KB Pattern", "KB Family",
-        "KB Family Size", "Consolidation Note", "Action", "Suggested Signature Seed", "User-Agent",
+        "Candidate Reason", "SPM Status", "KB Match", "KB RefID", "KB SMStat ID", "KB Signature ID",
+        "KB Device Type", "KB Pattern", "KB Row Pattern", "KB Dependencies", "KB Match Terms",
+        "KB Match Type", "KB Family", "KB Family Size", "Consolidation Note", "Action",
+        "Suggested Signature Seed", "User-Agent",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -44,8 +46,15 @@ def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
             row.get("iot_candidate_reason", ""),
             status,
             row.get("kb_match", ""),
+            row.get("kb_refid", ""),
+            row.get("kb_smstat_id", ""),
+            row.get("kb_signature_id", ""),
             row.get("kb_device_type", ""),
             row.get("kb_pattern", ""),
+            row.get("kb_row_pattern", ""),
+            row.get("kb_dependency_patterns", ""),
+            row.get("kb_match_terms", ""),
+            row.get("kb_match_type", ""),
             row.get("kb_family", ""),
             _to_int(row.get("kb_family_size")),
             _consolidation_note(row),
