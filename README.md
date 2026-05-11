@@ -466,10 +466,18 @@ The final Excel report contains:
 
 - Priority order by total hits
 - Hardware type/vendor/model/marketing name
-- SPM status: `detected-released`, `detected-reviewed`, `detected-disabled`, `not-present`
+- SPM status for review-worthy rows, excluding already released detections by default
 - Local SPM export KB match/family fields for duplicate/consolidation review
 - Suggested action
 - Original User-Agent
+
+By default, Stage 6 and the final review XLSX exclude rows where:
+
+- `hardware_type` is `Mobile Phone`
+- `spm_detection_status` is `detected-released`
+
+These defaults are configurable in `config/settings.yaml` under
+`spm.exclude_hardware_types` and `spm.exclude_detection_statuses`.
 
 ## Filtering / dedupe strategy
 

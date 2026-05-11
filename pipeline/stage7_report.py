@@ -7,9 +7,12 @@ from typing import Any, Dict, List
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+from utils.review_filters import keep_review_row
+
 
 def build_review_report(cfg: Dict[str, Any], spm_path: str | Path) -> Path:
     rows = _read_dicts(spm_path)
+    rows = [row for row in rows if keep_review_row(row, cfg)]
     out_dir = Path(cfg["paths"]["reports_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"{Path(spm_path).stem}.review.xlsx"

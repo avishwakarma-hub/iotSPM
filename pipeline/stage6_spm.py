@@ -13,6 +13,7 @@ import requests
 from pipeline.artifacts import atomic_write_rows
 from utils.db import Database
 from utils.progress import ProgressReporter
+from utils.review_filters import excluded_hardware_types, keep_review_row
 from utils.spm_kb import SpmKnowledgeBase, load_knowledge_base
 from utils.ua_normalizer import ua_hash
 
@@ -136,6 +137,9 @@ def run_spm_check(
 ) -> Path:
     rows = _read_dicts(enriched_path)
     rows = [row for row in rows if row.get("is_iot_candidate") == "yes"]
+    excluded_hardware = excluded_hardware_types(cfg)
+    if excluded_hardware:
+        rows = [row for row in rows if str(row.get("hardware_type", "")).strip().casefold() not in excluded_hardware]
     analyzer = SpmAnalyzer(cfg, db)
     workers = int(cfg.get("spm", {}).get("workers", 10))
     out_dir = Path(cfg["paths"]["reports_dir"])
@@ -150,16 +154,18 @@ def run_spm_check(
     ]
     continue_on_error = bool(cfg.get("spm", {}).get("continue_on_error", True))
 
-    output_rows: List[Dict[str, Any]] = _read_partial_rows(partial_path)
-    completed_uas = {row.get("user_agent", "") for row in output_rows if row.get("spm_detection_status")}
+    partial_rows: List[Dict[str, Any]] = _read_partial_rows(partial_path)
+    output_rows: List[Dict[str, Any]] = [row for row in partial_rows if keep_review_row(row, cfg)]
+    completed_uas = {row.get("user_agent", "") for row in partial_rows if row.get("spm_detection_status")}
+    completed_count = len(partial_rows)
     pending_rows = [row for row in rows if row.get("user_agent", "") not in completed_uas]
     if progress:
-        resume_note = f"; resuming {len(output_rows)} completed" if output_rows else ""
+        resume_note = f"; resuming {completed_count} completed" if completed_count else ""
         progress.info("spm", f"checking {len(rows)} IoT candidate UA groups with {workers} workers{resume_note}")
-        progress.update("spm", len(output_rows), len(rows), force=True)
+        progress.update("spm", completed_count, len(rows), force=True)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {executor.submit(analyzer.analyze, row["user_agent"]): row for row in pending_rows}
-        for completed, future in enumerate(as_completed(future_map), start=len(output_rows) + 1):
+        for completed, future in enumerate(as_completed(future_map), start=completed_count + 1):
             row = future_map[future]
             try:
                 status, matches, kb_match = future.result()
@@ -173,8 +179,9 @@ def run_spm_check(
             row["spm_match_count"] = len(matches)
             _apply_kb_match(row, kb_match)
             row["spm_matches_json"] = json.dumps(matches, ensure_ascii=False)
-            output_rows.append(row)
             _append_partial_row(partial_path, row, fieldnames)
+            if keep_review_row(row, cfg):
+                output_rows.append(row)
             if progress:
                 progress.update("spm", completed, len(rows), status)
 

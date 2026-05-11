@@ -125,6 +125,11 @@ spm:
   # Keep the review report moving when only a few UAs fail after retries.
   # Failed rows are marked spm-error with the error JSON for manual retry/review.
   continue_on_error: true
+  # Exclude low-value rows from SPM CSV and final review XLSX.
+  exclude_hardware_types:
+    - Mobile Phone
+  exclude_detection_statuses:
+    - detected-released
 
 spm_export:
   enabled: true
