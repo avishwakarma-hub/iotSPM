@@ -83,6 +83,10 @@ google_drive:
 
 report_upload:
   enabled: true
+  # If false, upload/auth-scope failures log a warning and the pipeline still
+  # completes with the local XLSX report. Set true when Drive upload must be
+  # mandatory for completion.
+  required: false
   # Optional Google Drive folder id where final XLSX reports should be uploaded.
   folder_id: ""
   filename: ""

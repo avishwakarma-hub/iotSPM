@@ -14,7 +14,7 @@ from pipeline.stage4_filter import filter_and_dedupe
 from pipeline.stage5_deviceatlas import enrich_with_deviceatlas
 from pipeline.stage6_spm import run_spm_check
 from pipeline.stage7_report import build_review_report
-from pipeline.stage8_upload import upload_report_if_enabled
+from pipeline.stage8_upload import ReportUploadPermissionError, upload_report_if_enabled
 from tools.spm_export_fetcher import ensure_spm_knowledge_base
 from utils.db import Database
 from utils.notifier import Notifier
@@ -290,7 +290,14 @@ class PipelineOrchestrator:
             self.db.update_run(run_id, state=STAGE_STATE["upload"], last_stage="upload")
             self.progress.done("upload", run["uploaded_report_link"])
             return
-        upload = upload_report_if_enabled(self.cfg, report_path)
+        upload_cfg = self.cfg.get("report_upload", {})
+        try:
+            upload = upload_report_if_enabled(self.cfg, report_path)
+        except ReportUploadPermissionError as exc:
+            if upload_cfg.get("required", False):
+                raise
+            self.logger.warning("Run %s final report upload skipped: %s", run_id, exc)
+            upload = None
         updates: Dict[str, Any] = {"state": STAGE_STATE["upload"], "last_stage": "upload"}
         if upload:
             updates.update(uploaded_report_file_id=upload.get("file_id"), uploaded_report_link=upload.get("web_view_link"))

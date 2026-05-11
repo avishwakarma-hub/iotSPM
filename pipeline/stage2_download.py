@@ -10,7 +10,7 @@ from utils.google_auth import get_drive_service
 
 
 def download_drive_file(cfg: Dict[str, Any], file_id: str, output_dir: Optional[str] = None) -> Path:
-    service = get_drive_service(cfg)
+    service = get_drive_service(cfg, scopes=["https://www.googleapis.com/auth/drive.readonly"])
     file_meta = service.files().get(fileId=file_id, fields="name, mimeType").execute()
     file_name = file_meta.get("name", file_id)
     out_dir = Path(output_dir or cfg["paths"]["raw_dir"])

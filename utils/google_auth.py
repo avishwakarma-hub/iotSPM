@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 from urllib.parse import parse_qs, urlparse
 
 from google.auth.transport.requests import Request
@@ -11,6 +12,38 @@ from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+
+def _normalize_scopes(scopes: Any) -> List[str]:
+    if isinstance(scopes, str):
+        return [scopes]
+    return list(scopes or ["https://www.googleapis.com/auth/drive.readonly"])
+
+
+def _token_has_required_scopes(creds: Credentials, required_scopes: List[str]) -> bool:
+    """Validate scopes against the actual token payload, not only requested scopes."""
+
+    granted_scopes = set(creds.granted_scopes or creds.scopes or [])
+    return set(required_scopes).issubset(granted_scopes)
+
+
+def _token_file_has_required_scopes(token_file: Path, required_scopes: List[str]) -> bool:
+    """Check scopes saved in token.json before passing requested scopes to Google."""
+
+    try:
+        data = json.loads(token_file.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    saved_scopes = data.get("scopes") or data.get("scope") or []
+    if isinstance(saved_scopes, str):
+        saved_scopes = saved_scopes.split()
+    # Older token.json files may not include a scopes field. Treat them as stale
+    # so scope changes force one manual OAuth instead of failing during upload.
+    return set(required_scopes).issubset(set(saved_scopes))
+
+
+class GoogleDriveScopeError(RuntimeError):
+    """Raised when saved OAuth credentials do not contain required scopes."""
 
 
 def _manual_oauth(flow: InstalledAppFlow) -> Credentials:
@@ -65,20 +98,28 @@ def _manual_oauth(flow: InstalledAppFlow) -> Credentials:
     return flow.credentials
 
 
-def get_drive_service(cfg: Dict[str, Any]):
+def get_drive_service(cfg: Dict[str, Any], scopes: Any = None, allow_reauth: bool = True):
     paths = cfg.get("paths", {})
-    scopes = cfg.get("google_drive", {}).get("scopes", ["https://www.googleapis.com/auth/drive.readonly"])
+    scopes = _normalize_scopes(scopes or cfg.get("google_drive", {}).get("scopes"))
     credentials_file = Path(paths.get("google_credentials_file", "credentials/credentials.json"))
     token_file = Path(paths.get("google_token_file", "credentials/token.json"))
     token_file.parent.mkdir(parents=True, exist_ok=True)
 
     creds = None
     if token_file.exists():
-        creds = Credentials.from_authorized_user_file(str(token_file), scopes)
-        if not creds.has_scopes(scopes):
+        if not _token_file_has_required_scopes(token_file, scopes):
             token_file.unlink()
             creds = None
+        else:
+            creds = Credentials.from_authorized_user_file(str(token_file), scopes)
+            if not creds.has_scopes(scopes) or not _token_has_required_scopes(creds, scopes):
+                token_file.unlink()
+                creds = None
     if not creds or not creds.valid:
+        if not allow_reauth:
+            raise GoogleDriveScopeError(
+                f"Google Drive OAuth token at {token_file} is missing required scopes: {', '.join(scopes)}"
+            )
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())

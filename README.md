@@ -182,6 +182,10 @@ Run one-time auth:
 python run.py auth-drive
 ```
 
+By default this verifies the scopes configured under `google_drive.scopes`. If
+you only need download access for a legacy environment, keep only
+`drive.readonly` in that list. For final report uploads, include `drive.file`.
+
 It will print a URL/code flow for headless server auth. Open the URL manually in your browser, approve access, then paste either the returned code or the full `http://localhost:8080/?code=...` redirected URL into the terminal.
 
 After successful auth it saves:
@@ -411,15 +415,22 @@ google_drive:
 
 report_upload:
   enabled: true
+  required: false
   folder_id: <optional-drive-folder-id>
 ```
 
-If you previously authenticated with `drive.readonly`, re-run OAuth once because
-the token scope changed:
+If you previously authenticated with `drive.readonly`, delete the old token and
+re-run OAuth once because the token scope changed:
 
 ```bash
+rm /mnt/ext_storage/iotSPM/credentials/token.json
 python run.py auth-drive
 ```
+
+When `report_upload.required: false` (default), final Drive upload failures such
+as `insufficient authentication scopes` are logged as warnings and the pipeline
+still completes with the local XLSX report path. Set `required: true` only when a
+successful Drive upload must be mandatory.
 
 If upload is not desired in a particular environment, disable it in
 `config/settings.local.yaml`:
