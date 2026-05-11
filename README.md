@@ -334,6 +334,10 @@ Manual commands:
 # Fetch latest approved export and rebuild KB only if export_id changed
 python tools/spm_export_fetcher.py
 
+# Diagnose which exports the API can see
+python tools/spm_export_fetcher.py --list-exports
+python tools/spm_export_fetcher.py --list-exports --all-states
+
 # Force rebuild from latest approved export
 python tools/spm_export_fetcher.py --force
 

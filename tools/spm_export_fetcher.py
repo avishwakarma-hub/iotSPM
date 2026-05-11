@@ -5,7 +5,7 @@ import json
 import sys
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -34,30 +34,61 @@ class SpmExportClient:
         return headers
 
     def latest_approved_export(self) -> Optional[Dict[str, Any]]:
+        exports = self.list_exports(approved_only=True, limit=20)
+        return exports[0] if exports else None
+
+    def list_exports(self, *, approved_only: bool = False, limit: int = 20) -> List[Dict[str, Any]]:
         if not self.base_url:
-            return None
+            return []
         url = f"{self.base_url}/api/coverage/spm-exports/"
-        params = {"state": "approved", "ordering": "-id", "limit": 1}
-        response = requests.get(url, params=params, headers=self.headers(), timeout=self.timeout, verify=self.verify_ssl)
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, list):
-            return data[0] if data else None
-        results = data.get("results") if isinstance(data, dict) else None
-        if isinstance(results, list):
-            return results[0] if results else None
-        return data if isinstance(data, dict) and data.get("id") else None
+        attempts = self._list_param_attempts(approved_only=approved_only, limit=limit)
+        seen: set[str] = set()
+        all_exports: List[Dict[str, Any]] = []
+        for params in attempts:
+            key = json.dumps(params, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            response = requests.get(url, params=params, headers=self.headers(), timeout=self.timeout, verify=self.verify_ssl)
+            response.raise_for_status()
+            exports = _extract_exports(response.json())
+            if approved_only:
+                exports = [item for item in exports if _is_approved_export(item)]
+            exports = _sort_exports(exports)
+            if exports:
+                return exports[:limit]
+            all_exports.extend(exports)
+        return _sort_exports(all_exports)[:limit]
+
+    def _list_param_attempts(self, *, approved_only: bool, limit: int) -> List[Dict[str, Any]]:
+        base = {"ordering": "-id", "limit": limit}
+        if not approved_only:
+            return [base, {"order_by": "-id", "limit": limit}, {"limit": limit}, {}]
+        return [
+            {**base, "state": "approved"},
+            {**base, "status": "approved"},
+            {**base, "approval_status": "approved"},
+            {**base, "approved": "true"},
+            # Some deployments ignore/rename status filters. Fetch recent exports
+            # and filter client-side so a renamed query parameter does not hide data.
+            base,
+            {"order_by": "-id", "limit": limit},
+            {"limit": limit},
+            {},
+        ]
 
     def export_detail(self, export_id: str | int) -> Dict[str, Any]:
         url = f"{self.base_url}/api/coverage/spm-exports/{export_id}/"
         response = requests.get(url, headers=self.headers(), timeout=self.timeout, verify=self.verify_ssl)
         response.raise_for_status()
-        return response.json()
+        return _normalize_export_response(response.json())
 
     def download_export(self, export_info: Dict[str, Any], download_dir: str | Path) -> Path:
         export_id = export_info.get("id")
         detail = self.export_detail(export_id) if export_id else export_info
         download_url = _download_url(detail)
+        if not download_url and export_id:
+            download_url = _export_download_path(export_id)
         if not download_url:
             raise RuntimeError(f"Could not find download URL in SPM export response for export {export_id}: {detail}")
         if download_url.startswith("/"):
@@ -152,7 +183,83 @@ def _download_url(data: Dict[str, Any]) -> str:
             nested = _download_url(value)
             if nested:
                 return nested
+    for key in ("data", "result", "export"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            nested = _download_url(value)
+            if nested:
+                return nested
     return ""
+
+
+def _normalize_export_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    nested = data.get("data")
+    if isinstance(nested, dict) and nested.get("id"):
+        merged = dict(nested)
+        for key, value in data.items():
+            if key != "data" and key not in merged:
+                merged[key] = value
+        return merged
+    return data
+
+
+def _extract_exports(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("results", "data", "objects", "items", "exports"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested = _extract_exports(value)
+            if nested:
+                return nested
+    return [data] if data.get("id") else []
+
+
+def _export_download_path(export_id: str | int) -> str:
+    return f"/api/coverage/spm-exports/{export_id}/download/"
+
+
+def _is_approved_export(item: Dict[str, Any]) -> bool:
+    for key in ("state", "status", "approval_status", "review_status"):
+        value = str(item.get(key) or "").strip().casefold()
+        if value:
+            return value in {"approved", "approve", "released", "completed", "complete", "ready"}
+    for key in ("approved", "is_approved", "isApproved"):
+        if key in item:
+            return bool(item.get(key))
+    # If the API list endpoint does not expose approval state, accept records that
+    # look downloadable. The detail/download step will still fail loudly if invalid.
+    return bool(item.get("id") and _download_url(item))
+
+
+def _sort_exports(exports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(exports, key=_export_sort_key, reverse=True)
+
+
+def _export_sort_key(item: Dict[str, Any]) -> tuple[int, str]:
+    raw_id = item.get("id") or item.get("pk") or item.get("export_id") or 0
+    try:
+        numeric_id = int(raw_id)
+    except Exception:
+        numeric_id = 0
+    date_value = str(item.get("created_at") or item.get("updated_at") or item.get("created") or "")
+    return numeric_id, date_value
+
+
+def summarize_exports(exports: List[Dict[str, Any]]) -> str:
+    if not exports:
+        return "No SPM exports returned by the API."
+    lines = []
+    for item in exports:
+        state = item.get("state") or item.get("status") or item.get("approval_status") or item.get("review_status") or "unknown"
+        created = item.get("created_at") or item.get("created") or item.get("updated_at") or ""
+        has_url = "yes" if _download_url(item) or item.get("id") else "no"
+        lines.append(f"id={item.get('id', '')} state={state} created={created} downloadable={has_url}")
+    return "\n".join(lines)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -174,16 +281,23 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Rebuild even if cached KB export_id is already latest")
     parser.add_argument("--local-file", help="Build KB from an already extracted phrases_req_uri.spm file")
     parser.add_argument("--export-id", default=None, help="Override export id metadata or fetch a specific export id")
+    parser.add_argument("--list-exports", action="store_true", help="List recent SPM exports visible to the API and exit")
+    parser.add_argument("--all-states", action="store_true", help="With --list-exports, do not filter to approved exports")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    if args.local_file:
+    if args.list_exports:
+        client = SpmExportClient(cfg)
+        exports = client.list_exports(approved_only=not args.all_states, limit=20)
+        print(summarize_exports(exports))
+    elif args.local_file:
         path = build_from_local_file(cfg, args.local_file, export_id=args.export_id or "local")
+        print(path or "SPM KB not built")
     else:
         if args.export_id:
             cfg.setdefault("spm_export", {})["export_id"] = args.export_id
         path = ensure_spm_knowledge_base(cfg, force=args.force)
-    print(path or "SPM KB not built")
+        print(path or "SPM KB not built")
 
 
 if __name__ == "__main__":
