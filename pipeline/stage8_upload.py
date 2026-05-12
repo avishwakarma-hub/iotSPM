@@ -36,7 +36,12 @@ def _upload_permission_message(cfg: Dict[str, Any]) -> str:
     )
 
 
-def upload_report_if_enabled(cfg: Dict[str, Any], report_path: str | Path) -> Optional[Dict[str, str]]:
+def upload_report_if_enabled(
+    cfg: Dict[str, Any],
+    report_path: str | Path,
+    *,
+    filename: str | None = None,
+) -> Optional[Dict[str, str]]:
     """Upload the final review report to Google Drive when configured.
 
     This is optional and independent from the Rundeck download Drive auth. It
@@ -57,7 +62,7 @@ def upload_report_if_enabled(cfg: Dict[str, Any], report_path: str | Path) -> Op
         if _is_insufficient_permission_error(exc):
             raise ReportUploadPermissionError(_upload_permission_message(cfg)) from exc
         raise
-    metadata: Dict[str, Any] = {"name": upload_cfg.get("filename") or report_path.name}
+    metadata: Dict[str, Any] = {"name": filename or upload_cfg.get("filename") or report_path.name}
     folder_id = upload_cfg.get("folder_id")
     if folder_id:
         metadata["parents"] = [folder_id]

@@ -91,6 +91,12 @@ report_upload:
   folder_id: ""
   filename: ""
 
+focus_report:
+  # Separate model/family report that ranks clusters by Zscaler hits for
+  # signature planning. The full review report remains UA-row oriented.
+  top_clusters: 40
+  max_sample_uas_per_cluster: 5
+
 filtering:
   min_ua_length: 5
   max_ua_length: 1000
@@ -122,6 +128,14 @@ spm:
   request_retries: 3
   retry_backoff_seconds: 5
   retry_status_codes: [429, 500, 502, 503, 504]
+  # The live SPM analyze API is the authority because it can see review-mode or
+  # newly added SPMs that are not present in approved export files yet.
+  # Keep use_cache false for research/review runs where today's SPM changes must
+  # be visible. Set true only when speed/rate-limit protection is more important.
+  use_cache: false
+  force_live_check: true
+  # Optional cache TTL if use_cache is enabled. null/blank means no expiration.
+  cache_ttl_days: 1
   # Keep the review report moving when only a few UAs fail after retries.
   # Failed rows are marked spm-error with the error JSON for manual retry/review.
   continue_on_error: true

@@ -303,9 +303,11 @@ included as `spm-error` rows so the high-volume review report can still be built
 
 Before Stage 6, the orchestrator runs a lightweight SPM export sync. With
 `spm_export.export_id: latest`, it checks the latest approved export id and only
-downloads/rebuilds the local KB when that id changes. If sync fails and
-`spm_export.required: false`, the pipeline logs a warning and continues with the
-live SPM API check.
+downloads/rebuilds the local KB when that id changes. The export KB is only an
+annotation/audit layer; the live SPM analyze API remains the authority because it
+can see ready-for-review/newly added SPMs that are not in approved export files
+yet. If sync fails and `spm_export.required: false`, the pipeline logs a warning
+and continues with the live SPM API check.
 
 ```bash
 # Rebuild SPM, report, and upload only; reuse raw/csv/cleaned/DeviceAtlas files
@@ -361,10 +363,62 @@ The Stage 6 CSV now includes these KB columns:
 - `kb_family_size`
 - `kb_export_id`
 
+It also includes live-vs-KB audit columns:
+
+- `spm_result_source` — `live`, `live-cache-bypassed`, `live-cache-expired`,
+  `cache`, or `error`
+- `spm_cache_created_at`
+- `kb_live_verdict` — for example
+  `live-only-likely-review-mode-or-kb-miss`,
+  `kb-only-review-match-logic-or-export-difference`, or
+  `kb-and-live-agree-detected`
+- `live_iot_match_count`
+- `live_iot_matches_json`
+
+Recommended SPM cache settings for research/review runs:
+
+```yaml
+spm:
+  # Force fresh live SPM checks so ready-for-review signatures added today are visible.
+  use_cache: false
+  force_live_check: true
+  cache_ttl_days: 1
+```
+
+Set `use_cache: true` / `force_live_check: false` only when you need speed or
+rate-limit protection more than immediate visibility of newly added SPMs.
+
 The Excel report shows KB match/family columns and a consolidation note. If a UA
 is marked `not-present` by the live SPM API but matches the local export KB, the
 action becomes `review-existing-kb-match` so you can investigate mismatched
-coverage/export freshness before adding a duplicate signature.
+coverage/export freshness before adding a duplicate signature. If live SPM
+detects the UA but the KB does not, the action becomes
+`already-covered-live-review-kb-miss`, which usually means the signature is new,
+ready-for-review, disabled/reviewed but not exported yet, or the KB matching logic
+missed something that the real SPM engine understands.
+
+### Focus cluster report for signature planning
+
+Every report stage now creates two XLSX files:
+
+1. the normal UA-level review workbook; and
+2. a `_focus.xlsx` workbook that groups not-present/review-worthy rows by
+   DeviceAtlas vendor/model/marketing-name/hardware family.
+
+The focus workbook is designed for the “what should I add first?” workflow. It
+ranks model clusters by total Zscaler hits, shows how many UA variants are in the
+cluster, includes KB family context when available, and lists representative UAs
+to copy into signature review. The completion email also highlights the top
+not-present devices and attaches the focus workbook. If Drive upload is enabled,
+the pipeline uploads both the review workbook and the focus workbook.
+
+Tune focus sizing in config:
+
+```yaml
+focus_report:
+  top_clusters: 40
+  max_sample_uas_per_cluster: 5
+```
 
 Failure emails include the last completed stage, error message, and a suggested
 restart command. `python run.py status --limit 20` also shows `last_stage` and
@@ -403,8 +457,10 @@ python run.py run-local /path/to/report.csv --day 2026-01-01 --stop-after filter
 ### Google Drive upload of the final Excel report
 
 Final XLSX reports are stored locally under `data/reports/` and, by default,
-uploaded to Google Drive before the completion email is sent. The email includes
-the uploaded report link when upload succeeds.
+uploaded to Google Drive before the completion email is sent. The pipeline uploads
+the UA-level review workbook and the `_focus.xlsx` model-cluster workbook when
+both exist. The email includes the uploaded review report link when upload
+succeeds and attaches the focus workbook for quick triage.
 
 The same OAuth client/token used for Rundeck report download is reused for final
 report upload. Keep `drive.readonly` for downloading Rundeck-generated report
@@ -474,6 +530,12 @@ The final Excel report contains:
 - Local SPM export KB match/family fields for duplicate/consolidation review
 - Suggested action
 - Original User-Agent
+
+The companion `_focus.xlsx` report contains:
+
+- `Focus Clusters`: model/family-level not-present candidates ranked by total hits
+- `Sample UAs`: top representative UAs per cluster
+- `Detected Summary`: already-detected clusters for coverage sanity checks
 
 By default, Stage 6 and the final review XLSX exclude rows where:
 

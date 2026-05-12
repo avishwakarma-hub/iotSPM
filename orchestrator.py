@@ -13,7 +13,7 @@ from pipeline.stage3_convert import convert_to_csv_if_needed
 from pipeline.stage4_filter import filter_and_dedupe
 from pipeline.stage5_deviceatlas import enrich_with_deviceatlas
 from pipeline.stage6_spm import run_spm_check
-from pipeline.stage7_report import build_review_report
+from pipeline.stage7_report import build_focus_report, build_review_report, focus_report_path
 from pipeline.stage8_upload import ReportUploadPermissionError, upload_report_if_enabled
 from tools.spm_export_fetcher import ensure_spm_knowledge_base
 from utils.db import Database
@@ -156,7 +156,9 @@ class PipelineOrchestrator:
             self.db.update_run(run_id, status="completed", state="COMPLETED", last_stage="completed", report_dir=str(report_path.parent))
             self.progress.done("pipeline", f"report={report_path}")
             text_body, html_body = self._completion_email(run_id, report_path)
-            self.notifier.send("iotSPM pipeline completed", text_body, html_body=html_body)
+            focus_path = focus_report_path(self.cfg, spm_path)
+            attachments = [focus_path] if focus_path.is_file() else []
+            self.notifier.send("iotSPM pipeline completed", text_body, html_body=html_body, attachments=attachments)
             return report_path
         except Exception as exc:
             self.db.update_run(run_id, status="failed", state="FAILED", error_message=str(exc))
@@ -266,13 +268,25 @@ class PipelineOrchestrator:
         return spm_path
 
     def _stage_report(self, run_id: int, spm_path: Path, run, *, force: bool) -> Path:
-        self.progress.stage("report", "reuse existing artifact" if should_reuse_artifact(run["report_path"], force=force) else "build Excel review report")
-        if should_reuse_artifact(run["report_path"], force=force):
+        existing_focus_path = focus_report_path(self.cfg, spm_path)
+        reuse_review = should_reuse_artifact(run["report_path"], force=force)
+        reuse_focus = should_reuse_artifact(existing_focus_path, force=force)
+        self.progress.stage(
+            "report",
+            "reuse existing artifacts" if reuse_review and reuse_focus else "build Excel review and focus cluster reports",
+        )
+        if reuse_review:
             report_path = Path(run["report_path"])
             self.logger.info("Run %s reusing review report: %s", run_id, report_path)
         else:
             report_path = build_review_report(self.cfg, spm_path)
             self.logger.info("Run %s review report: %s", run_id, report_path)
+        if reuse_focus:
+            focus_path = existing_focus_path
+            self.logger.info("Run %s reusing focus report: %s", run_id, focus_path)
+        else:
+            focus_path = build_focus_report(self.cfg, spm_path)
+            self.logger.info("Run %s focus report: %s", run_id, focus_path)
         self.db.update_run(
             run_id,
             report_path=str(report_path),
@@ -280,7 +294,7 @@ class PipelineOrchestrator:
             state=STAGE_STATE["report"],
             last_stage="report",
         )
-        self.progress.done("report", str(report_path))
+        self.progress.done("report", f"review={report_path}; focus={focus_path}")
         return report_path
 
     def _stage_upload(self, run_id: int, report_path: Path, run, *, force: bool) -> None:
@@ -291,8 +305,12 @@ class PipelineOrchestrator:
             self.progress.done("upload", run["uploaded_report_link"])
             return
         upload_cfg = self.cfg.get("report_upload", {})
+        focus_path = focus_report_path(self.cfg, run["spm_path"] or report_path)
+        focus_upload = None
         try:
             upload = upload_report_if_enabled(self.cfg, report_path)
+            if upload and focus_path.is_file():
+                focus_upload = upload_report_if_enabled(self.cfg, focus_path, filename=focus_path.name)
         except ReportUploadPermissionError as exc:
             if upload_cfg.get("required", False):
                 raise
@@ -302,8 +320,16 @@ class PipelineOrchestrator:
         if upload:
             updates.update(uploaded_report_file_id=upload.get("file_id"), uploaded_report_link=upload.get("web_view_link"))
             self.logger.info("Run %s uploaded review report: %s", run_id, upload.get("web_view_link"))
+        if focus_upload:
+            self.logger.info("Run %s uploaded focus report: %s", run_id, focus_upload.get("web_view_link"))
         self.db.update_run(run_id, **updates)
-        self.progress.done("upload", upload.get("web_view_link") if upload else "upload disabled/not configured")
+        if upload and focus_upload:
+            upload_message = f"review={upload.get('web_view_link')}; focus={focus_upload.get('web_view_link')}"
+        elif upload:
+            upload_message = upload.get("web_view_link") or "uploaded"
+        else:
+            upload_message = "upload disabled/not configured"
+        self.progress.done("upload", upload_message)
 
     @staticmethod
     def _validate_stage(stage: str) -> None:
@@ -317,6 +343,7 @@ class PipelineOrchestrator:
     def _completion_email(self, run_id: int, report_path: Path) -> Tuple[str, str]:
         run = self._run(run_id)
         summary = self._spm_summary(run["spm_path"])
+        focus_path = focus_report_path(self.cfg, run["spm_path"] or report_path)
 
         text_lines = [
             f"Run {run_id} completed successfully.",
@@ -327,6 +354,7 @@ class PipelineOrchestrator:
             f"Disabled: {summary['disabled_devices']} UA groups ({summary['disabled_hits']} hits)",
             f"SPM errors: {summary['error_devices']} UA groups ({summary['error_hits']} hits)",
             f"Review report: {report_path}",
+            f"Focus cluster report: {focus_path}",
         ]
         if run["uploaded_report_link"]:
             text_lines.append(f"Google Drive link: {run['uploaded_report_link']}")
@@ -348,7 +376,7 @@ class PipelineOrchestrator:
             ]
         )
 
-        html_body = self._completion_html(run_id, run, report_path, summary)
+        html_body = self._completion_html(run_id, run, report_path, summary, focus_path)
         return "\n".join(text_lines), html_body
 
     def _spm_summary(self, spm_path: str | Path | None) -> Dict[str, Any]:
@@ -410,7 +438,7 @@ class PipelineOrchestrator:
             "all_not_present_count": len(not_present_items),
         }
 
-    def _completion_html(self, run_id: int, run: Any, report_path: Path, summary: Dict[str, Any]) -> str:
+    def _completion_html(self, run_id: int, run: Any, report_path: Path, summary: Dict[str, Any], focus_path: Path) -> str:
         total_devices = int(summary["total_devices"] or 0)
         total_hits = int(summary["total_hits"] or 0)
         detected_pct = self._pct(summary["detected_devices"], total_devices)
@@ -427,6 +455,7 @@ class PipelineOrchestrator:
                 'padding:10px 14px;border-radius:8px;font-weight:600;margin-right:8px;">Open Google Drive Report</a>'
             )
         report_path_text = escape(str(report_path))
+        focus_path_text = escape(str(focus_path))
         spm_path_text = escape(str(run["spm_path"] or ""))
 
         return f"""
@@ -457,6 +486,7 @@ class PipelineOrchestrator:
             <div style="height:14px;width:{not_present_pct};background:#ef4444;float:left;"></div>
           </div>
           <p style="margin:0;color:#475569;font-size:14px;">Green = already detected/reviewed/released. Red = not-present candidates that likely need signature review.</p>
+          <p style="margin:10px 0 0;color:#475569;font-size:14px;">The attached focus cluster report groups related UA variants by DeviceAtlas model/family and ranks them by hits so you can cover the largest traffic families first.</p>
         </div>
 
         <h2 style="font-size:18px;margin:0 0 12px;color:#111827;">Top not-present IoT devices by Zscaler hits</h2>
@@ -480,6 +510,7 @@ class PipelineOrchestrator:
 
         <div style="font-size:13px;color:#475569;line-height:1.55;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px;">
           <div><strong>Review report:</strong> <code>{report_path_text}</code></div>
+          <div><strong>Attached focus cluster report:</strong> <code>{focus_path_text}</code></div>
           <div><strong>SPM CSV:</strong> <code>{spm_path_text}</code></div>
           <div style="margin-top:10px;"><strong>Restart examples:</strong></div>
           <code>python run.py process {run_id} --from-stage spm</code><br>

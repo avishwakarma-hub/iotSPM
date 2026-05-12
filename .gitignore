@@ -21,5 +21,11 @@ data/csv/
 data/cleaned/
 data/enriched/
 data/reports/
+data/spm_exports/
+data/spm_knowledge_base.json
+data/spm_overlap_*.txt
+data/spm_overlap_*.csv
+data/spm_overlap_*.md
+tmp/
 logs/
 db/
