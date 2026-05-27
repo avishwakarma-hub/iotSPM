@@ -46,7 +46,8 @@ class PipelineOrchestrator:
 
     def submit(self, day: str, query_name: str = "build_only") -> int:
         query = self.cfg["rundeck"]["queries"][query_name]
-        start_time, end_time = day_window(day)
+        window_days = float(self.cfg.get("scheduler", {}).get("window_days", 1.0))
+        start_time, end_time = day_window(day, window_days)
         run_id = self.db.create_run(day, query_name, query, start_time, end_time)
         self.logger.info("Created run %s for %s query=%s", run_id, day, query_name)
         client = RundeckClient(self.cfg)
@@ -79,11 +80,16 @@ class PipelineOrchestrator:
 
     def poll_active(self, auto_process: bool = False) -> None:
         active_runs = self.db.list_active_runs()
+        processing_states = set(STAGE_STATE.values())
         if not active_runs:
             print("No active Rundeck runs found.")
             return
         for run in active_runs:
             run_id = int(run["id"])
+            if run["state"] in processing_states:
+                print(f"#{run_id} is currently in processing state {run['state']}, skipping poll.")
+                continue
+
             try:
                 result = self.poll(run_id)
                 print(f"#{run_id} status={result['status']} drive_file_id={result.get('drive_file_id')}")

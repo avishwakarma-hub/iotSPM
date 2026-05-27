@@ -521,7 +521,11 @@ class RundeckClient:
             ) from exc
 
 
-def day_window(day: str) -> Tuple[str, str]:
-    start = datetime.strptime(day, "%Y-%m-%d")
-    end = start + timedelta(days=1) - timedelta(seconds=1)
+def day_window(day: str, window_days: float = 1.0) -> Tuple[str, str]:
+    day = day.strip()
+    if len(day) > 10:
+        start = datetime.strptime(day, "%Y-%m-%d %H:%M")
+    else:
+        start = datetime.strptime(day, "%Y-%m-%d")
+    end = start + timedelta(days=window_days) - timedelta(seconds=1)
     return start.strftime(TIME_FORMAT), end.strftime(TIME_FORMAT)

@@ -12,7 +12,7 @@ from utils.db import Database
 from utils.notifier import Notifier
 
 
-DATE_FORMAT = "%Y-%m-%d"
+DATE_FORMAT_OUT = "%Y-%m-%d %H:%M"
 
 
 @dataclass
@@ -154,13 +154,14 @@ class ProgressiveScheduler:
     def _find_next_pending_date(self, base_date: str, query_name: str) -> Optional[str]:
         current = self._parse_date(base_date)
         latest = self._parse_date(self._latest_eligible_date())
+        interval_days = float(self.scheduler_cfg.get("interval_days", 1.0))
         if current > latest:
             return None
         while current <= latest:
-            day = current.strftime(DATE_FORMAT)
+            day = current.strftime(DATE_FORMAT_OUT) if current.hour or current.minute else current.strftime("%Y-%m-%d")
             if self._date_needs_run(day, query_name):
                 return day
-            current += timedelta(days=1)
+            current += timedelta(days=interval_days)
         return None
 
     def _date_needs_run(self, run_date: str, query_name: str) -> bool:
@@ -178,25 +179,30 @@ class ProgressiveScheduler:
     def _refresh_completed_cursor(self, scheduler_name: str, base_date: str, query_name: str) -> None:
         current = self._parse_date(base_date)
         latest = self._parse_date(self._latest_eligible_date())
+        interval_days = float(self.scheduler_cfg.get("interval_days", 1.0))
         last_completed = None
         while current <= latest:
-            day = current.strftime(DATE_FORMAT)
+            day = current.strftime(DATE_FORMAT_OUT) if current.hour or current.minute else current.strftime("%Y-%m-%d")
             runs = self.db.find_runs_for_date(day, query_name)
             if any(str(run["state"] or "") == "COMPLETED" for run in runs):
                 last_completed = day
-                current += timedelta(days=1)
+                current += timedelta(days=interval_days)
                 continue
             break
         if last_completed:
             self.db.update_scheduler_state(scheduler_name, last_completed_date=last_completed)
 
     def _latest_eligible_date(self) -> str:
-        lag = int(self.scheduler_cfg.get("date_lag_days", 1))
-        return (date.today() - timedelta(days=lag)).strftime(DATE_FORMAT)
+        lag = float(self.scheduler_cfg.get("date_lag_days", 1.0))
+        dt = datetime.now() - timedelta(days=lag)
+        return dt.strftime(DATE_FORMAT_OUT) if dt.hour or dt.minute else dt.strftime("%Y-%m-%d")
 
     @staticmethod
-    def _parse_date(value: str) -> date:
-        return datetime.strptime(value, DATE_FORMAT).date()
+    def _parse_date(value: str) -> datetime:
+        value = value.strip()
+        if len(value) <= 10:
+            return datetime.strptime(value, "%Y-%m-%d")
+        return datetime.strptime(value, DATE_FORMAT_OUT)
 
     @contextmanager
     def _lock(self, dry_run: bool = False) -> Iterator[None]:
