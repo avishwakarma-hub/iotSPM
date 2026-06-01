@@ -234,6 +234,30 @@ class Database:
                 (query_name,),
             ).fetchone()
 
+    def get_unresolved_processing_failure(self, query_name: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT failed.* FROM runs AS failed
+                WHERE failed.query_name = ?
+                  AND failed.state = 'FAILED'
+                  AND (
+                      failed.drive_file_id IS NOT NULL
+                      OR failed.raw_path IS NOT NULL
+                      OR failed.last_stage IS NOT NULL
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM runs AS completed
+                      WHERE completed.query_name = failed.query_name
+                        AND completed.run_date = failed.run_date
+                        AND completed.state = 'COMPLETED'
+                  )
+                ORDER BY failed.run_date ASC, failed.id ASC
+                LIMIT 1
+                """,
+                (query_name,),
+            ).fetchone()
+
     def get_scheduler_state(self, name: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM scheduler_state WHERE name = ?", (name,)).fetchone()

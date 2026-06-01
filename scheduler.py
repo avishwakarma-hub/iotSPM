@@ -96,6 +96,10 @@ class ProgressiveScheduler:
         if active_count >= max_active:
             return self._decision("waiting_active", f"Active Rundeck run limit reached: {active_count}/{max_active}.")
 
+        failed_processing_decision = self._failed_processing_decision(state["query_name"])
+        if failed_processing_decision:
+            return failed_processing_decision
+
         delay_decision = self._completion_delay_decision(state["query_name"])
         if delay_decision:
             return delay_decision
@@ -220,6 +224,25 @@ class ProgressiveScheduler:
             f"(remaining {self._format_timedelta(remaining)}).",
             run_id=int(latest_run["id"]),
             run_date=str(latest_run["run_date"]),
+        )
+
+    def _failed_processing_decision(self, query_name: str) -> Optional[SchedulerDecision]:
+        if not bool(self.scheduler_cfg.get("block_on_failed_processing_runs", True)):
+            return None
+
+        failed_run = self.db.get_unresolved_processing_failure(query_name)
+        if not failed_run:
+            return None
+
+        last_stage = failed_run["last_stage"] or "unknown"
+        return self._decision(
+            "waiting_failed_processing",
+            f"Run {failed_run['id']} for {failed_run['run_date']} failed after Rundeck produced data "
+            f"(last_stage={last_stage}); not submitting a newer run until this run is retried or completed. "
+            f"After fixing the issue, use `python run.py retry-add {failed_run['id']}` for scheduler-managed retry "
+            f"or `python run.py process {failed_run['id']} --from-stage <stage>` manually.",
+            run_id=int(failed_run["id"]),
+            run_date=str(failed_run["run_date"]),
         )
 
     def _latest_eligible_date(self) -> str:
