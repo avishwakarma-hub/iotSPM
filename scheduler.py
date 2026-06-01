@@ -96,6 +96,10 @@ class ProgressiveScheduler:
         if active_count >= max_active:
             return self._decision("waiting_active", f"Active Rundeck run limit reached: {active_count}/{max_active}.")
 
+        delay_decision = self._completion_delay_decision(state["query_name"])
+        if delay_decision:
+            return delay_decision
+
         next_date = self._find_next_pending_date(state["base_date"], state["query_name"])
         if not next_date:
             return self._decision("caught_up", "No pending eligible dates to submit.")
@@ -192,6 +196,32 @@ class ProgressiveScheduler:
         if last_completed:
             self.db.update_scheduler_state(scheduler_name, last_completed_date=last_completed)
 
+    def _completion_delay_decision(self, query_name: str) -> Optional[SchedulerDecision]:
+        delay_days = float(self.scheduler_cfg.get("min_delay_after_completion_days", 0) or 0)
+        if delay_days <= 0:
+            return None
+
+        latest_run = self.db.get_latest_completed_run(query_name)
+        if not latest_run:
+            return None
+
+        completed_at = self._parse_iso_datetime(str(latest_run["updated_at"]))
+        next_allowed_at = completed_at + timedelta(days=delay_days)
+        now = datetime.now(completed_at.tzinfo) if completed_at.tzinfo else datetime.now()
+        if now >= next_allowed_at:
+            return None
+
+        remaining = next_allowed_at - now
+        return self._decision(
+            "waiting_completion_delay",
+            f"Latest completed/uploaded run {latest_run['id']} finished at {completed_at.isoformat(timespec='seconds')}; "
+            f"waiting {delay_days:g} day(s) before submitting the next run. "
+            f"Next eligible at {next_allowed_at.isoformat(timespec='seconds')} "
+            f"(remaining {self._format_timedelta(remaining)}).",
+            run_id=int(latest_run["id"]),
+            run_date=str(latest_run["run_date"]),
+        )
+
     def _latest_eligible_date(self) -> str:
         lag = float(self.scheduler_cfg.get("date_lag_days", 1.0))
         dt = datetime.now() - timedelta(days=lag)
@@ -203,6 +233,26 @@ class ProgressiveScheduler:
         if len(value) <= 10:
             return datetime.strptime(value, "%Y-%m-%d")
         return datetime.strptime(value, DATE_FORMAT_OUT)
+
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime:
+        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+
+    @staticmethod
+    def _format_timedelta(value: timedelta) -> str:
+        total_seconds = max(0, int(value.total_seconds()))
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours or parts:
+            parts.append(f"{hours}h")
+        if minutes or parts:
+            parts.append(f"{minutes}m")
+        parts.append(f"{seconds}s")
+        return " ".join(parts)
 
     @contextmanager
     def _lock(self, dry_run: bool = False) -> Iterator[None]:

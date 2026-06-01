@@ -222,6 +222,18 @@ class Database:
                 )
             )
 
+    def get_latest_completed_run(self, query_name: str) -> Optional[sqlite3.Row]:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM runs
+                WHERE query_name = ? AND state = 'COMPLETED'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """,
+                (query_name,),
+            ).fetchone()
+
     def get_scheduler_state(self, name: str) -> Optional[sqlite3.Row]:
         with self.connect() as conn:
             return conn.execute("SELECT * FROM scheduler_state WHERE name = ?", (name,)).fetchone()

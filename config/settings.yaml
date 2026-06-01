@@ -64,6 +64,9 @@ scheduler:
   max_active_rundeck_runs: 1
   catch_up_enabled: true
   auto_process_succeeded: true
+  # Optional: wait this many days after a run reaches COMPLETED (report uploaded)
+  # before submitting the next run. Use 0 to disable this delay gate.
+  min_delay_after_completion_days: 0
   process_retries_first: true
   lock_timeout_minutes: 180
   max_retries_per_tick: 1
